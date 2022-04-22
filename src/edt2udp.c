@@ -5,6 +5,19 @@
 // Author(s)  BWC Brian Crosse brian.crosse@curtin.edu.au
 // Commenced 2018-07-04
 //
+// 3.00a-027    2021-09-14 BWC  Update all the IP addresses for medconv01 -> medconv10
+//
+// 3.00a-026    2021-08-23 BWC  Add timing information to help identify receivers which are not correctly programmed
+//
+// 3.00a-025    2021-05-06 BWC  Change array config to Short baseline
+//
+// 3.00a-024    2021-02-15 BWC  Remove redirection of coarse channels
+//
+// 3.00a-023    2021-01-08 BWC  Update rri2rf_input[] table to include 'RFIpole' on LONG BASELINE config
+//				Change redirection added in build 22 to '(CC09 will be redirected to where CC10 also goes)'
+//
+// 3.00a-022    2020-11-03 BWC  Force two coarse channels to same destination multicast address.  (CC11 will be redirected to where CC12 also goes)
+//
 // 3.00a-021    2019-12-11 BWC  Alter debug file writes to help diagnose rec05. Fix build number not incremented in 19/20
 //
 // 3.00a-020    2019-10-31 BWC  Change from long baseline to short baseline configuration
@@ -89,7 +102,7 @@
 
 #define _GNU_SOURCE
 
-#define BUILD 21
+#define BUILD 27
 #define WORKINGCHAN 8
 
 #include "edtinc.h"
@@ -258,7 +271,7 @@ mwa_udp_packet_t *udpbuff[UDP_BUFS];                    // udpbuff is an array o
 
 static const int packets_per_sec = 1280000;             // ...and they're numbered from 0 to 1279999 inclusive except due to a bug the last quotes a duplicate number 1279998
 static const int OneSecBuff_Size = 1280000 * 168;       // How big is each second worth of main data (excluding metadata)
-static const int NumChan=8;                             // Total number of coarse channels we need to handle.  8 on a singe fibre (3 fibres per receiver each handled by different processes)
+//static const int NumChan=8;                           // Total number of coarse channels we need to handle.  8 on a singe fibre (3 fibres per receiver each handled by different processes)
 //static const int time_points_per_sec = 20;            // The protocol specifies 20 groups (of 500 packets of 10kHz) per second
 //static const int coarse_buff_size = 528000;           // Protocol specifies 528000 bytes (2000 packets) for each coarse chan before moving on to next. Equal to OneSecBuff_Size / NumChan / time_points_per_sec
 //static const int fiftyms_buff_size = 12672000;                // Protocol specifies 12672000 bytes (24 x 2000 packets) for each 50ms time step before moving on to next.  Equal to coarse_buff_size * NumChan
@@ -275,7 +288,7 @@ INT64 start_capture_time = 0;                           // Unless overridden on 
 int max_files=2147483647;                               // Let's set a 'silly large' maximum number of files that isn't really a limit at all
 
 int edtbufs = 12;                                       // Set a default number of buffers for the EDT card
-int edtbufsize = 12;                                    // Set a default size in MegaBytes for the EDT card buffers
+int edtbufsize = 12;                                    // Set a default size in MegaBytes for the EDT card buffers.  NB: If this number is greater than 23, then the maths for arrival times needs tweaking.
 
 medconv_config_t conf;                                  // A place to store the configuration data for this instance of the program.  ie of the 60 copies running on 10 computers or whatever
 
@@ -300,7 +313,7 @@ INT32 unpackhdr(UINT16 *ptr, INT16 *fibre_lane)
     INT32 fibre = (hdr_word >> 6) & 0x3;                                        // 2 bits 0-2 for now.  Later will have (receiver-1)*3 added to it to give a system wide fibre number
     INT32 packet_num = (hdr_word & 0x1f) << 16;                                 // 5 bits (Top five bits of packet sequence number)
 
-    if ( receiver>25 || receiver <1 ) return(-2);                               // Invalid receiver number.  Must be 1 to 16 inclusive
+    if ( receiver>16 || receiver <1 ) return(-2);                               // Invalid receiver number.  Must be 1 to 16 inclusive
     if ( fibre == 3 ) return(-3);                                               // fibre can be 0,1 or 2 here.  Encoded in 2 bits, 3 is the only invalid pattern
     if ( (hdr_word & 0b1110000000100000) != 0) return(-4) ;                     // Unused bits are set
 
@@ -332,62 +345,81 @@ INT32 unpackhdr(UINT16 *ptr, INT16 *fibre_lane)
 void read_config ( char *us, int edtu, int edtc, medconv_config_t *config )
 {
 
-#define MAXINSTANCE (23)
+#define MAXINSTANCE (61)
 
     int instance_ndx = 0;                                                                       // Start out assuming we don't appear in the list
 
-/*
     medconv_config_t mc_config[MAXINSTANCE] = {
-       {0,"unknown",0,0,""}
-      ,{1,"medconv01",0,0,"192.168.90.121"}
-      ,{2,"medconv01",0,1,"192.168.90.121"}
-      ,{3,"medconv01",0,2,"192.168.90.121"}
-      ,{4,"medconv01",1,0,"192.168.90.122"}
-      ,{5,"medconv01",1,1,"192.168.90.122"}
-      ,{6,"medconv01",1,2,"192.168.90.122"}
-      ,{7,"vcs01",0,2,"192.168.90.101"}
-      ,{8,"vcs02",0,2,"192.168.90.102"}
-      ,{9,"vcs03",0,2,"192.168.90.103"}
-      ,{10,"vcs04",0,2,"192.168.90.104"}
-      ,{11,"vcs05",0,2,"192.168.90.105"}
-      ,{12,"vcs06",0,2,"192.168.90.106"}
-      ,{13,"vcs07",0,2,"192.168.90.107"}
-      ,{14,"vcs08",0,2,"192.168.90.108"}
-      ,{15,"vcs09",0,2,"192.168.90.109"}
-      ,{16,"vcs10",0,2,"192.168.90.110"}
-      ,{17,"vcs11",0,2,"192.168.90.111"}
-      ,{18,"vcs12",0,2,"192.168.90.112"}
-      ,{19,"vcs13",0,2,"192.168.90.113"}
-      ,{20,"vcs14",0,2,"192.168.90.114"}
-      ,{21,"vcs15",0,2,"192.168.90.115"}
-      ,{22,"vcs16",0,2,"192.168.90.116"}
-    };
-*/
+       { 0,"unknown",0,0,""}
+      ,{ 1,"medconv01",0,0,"192.168.90.121"}
+      ,{ 2,"medconv01",0,1,"192.168.90.121"}
+      ,{ 3,"medconv01",0,2,"192.168.90.121"}
+      ,{ 4,"medconv01",1,0,"192.168.90.122"}
+      ,{ 5,"medconv01",1,1,"192.168.90.122"}
+      ,{ 6,"medconv01",1,2,"192.168.90.122"}
 
-    medconv_config_t mc_config[MAXINSTANCE] = {
-       {0,"unknown",0,0,""}
-      ,{1,"medconv01",0,0,"192.168.90.121"}
-      ,{2,"medconv01",0,1,"192.168.90.121"}
-      ,{3,"medconv01",0,2,"192.168.90.121"}
-      ,{4,"medconv01",1,0,"192.168.90.122"}
-      ,{5,"medconv01",1,1,"192.168.90.122"}
-      ,{6,"medconv01",1,2,"192.168.90.122"}
-      ,{7,"vcs01",0,2,"202.9.9.131"}
-      ,{8,"vcs02",0,2,"202.9.9.132"}
-      ,{9,"vcs03",0,2,"202.9.9.133"}
-      ,{10,"vcs04",0,2,"202.9.9.134"}
-      ,{11,"vcs05",0,2,"202.9.9.135"}
-      ,{12,"vcs06",0,2,"202.9.9.136"}
-      ,{13,"vcs07",0,2,"202.9.9.137"}
-      ,{14,"vcs08",0,2,"202.9.9.138"}
-      ,{15,"vcs09",0,2,"202.9.9.139"}
-      ,{16,"vcs10",0,2,"202.9.9.140"}
-      ,{17,"vcs11",0,2,"202.9.9.141"}
-      ,{18,"vcs12",0,2,"202.9.9.142"}
-      ,{19,"vcs13",0,2,"202.9.9.143"}
-      ,{20,"vcs14",0,2,"202.9.9.144"}
-      ,{21,"vcs15",0,2,"202.9.9.145"}
-      ,{22,"vcs16",0,2,"202.9.9.146"}
+      ,{ 7,"medconv02",0,0,"192.168.90.3"}
+      ,{ 8,"medconv02",0,1,"192.168.90.3"}
+      ,{ 9,"medconv02",0,2,"192.168.90.3"}
+      ,{10,"medconv02",1,0,"192.168.90.4"}
+      ,{11,"medconv02",1,1,"192.168.90.4"}
+      ,{12,"medconv02",1,2,"192.168.90.4"}
+
+      ,{13,"medconv03",0,0,"192.168.90.5"}
+      ,{14,"medconv03",0,1,"192.168.90.5"}
+      ,{15,"medconv03",0,2,"192.168.90.5"}
+      ,{16,"medconv03",1,0,"192.168.90.6"}
+      ,{17,"medconv03",1,1,"192.168.90.6"}
+      ,{18,"medconv03",1,2,"192.168.90.6"}
+
+      ,{19,"medconv04",0,0,"192.168.90.7"}
+      ,{20,"medconv04",0,1,"192.168.90.7"}
+      ,{21,"medconv04",0,2,"192.168.90.7"}
+      ,{22,"medconv04",1,0,"192.168.90.8"}
+      ,{23,"medconv04",1,1,"192.168.90.8"}
+      ,{24,"medconv04",1,2,"192.168.90.8"}
+
+      ,{25,"medconv05",0,0,"192.168.90.9"}
+      ,{26,"medconv05",0,1,"192.168.90.9"}
+      ,{27,"medconv05",0,2,"192.168.90.9"}
+      ,{28,"medconv05",1,0,"192.168.90.10"}
+      ,{29,"medconv05",1,1,"192.168.90.10"}
+      ,{30,"medconv05",1,2,"192.168.90.10"}
+
+      ,{31,"medconv06",0,0,"192.168.90.11"}
+      ,{32,"medconv06",0,1,"192.168.90.11"}
+      ,{33,"medconv06",0,2,"192.168.90.11"}
+      ,{34,"medconv06",1,0,"192.168.90.12"}
+      ,{35,"medconv06",1,1,"192.168.90.12"}
+      ,{36,"medconv06",1,2,"192.168.90.12"}
+
+      ,{37,"medconv07",0,0,"192.168.90.13"}
+      ,{38,"medconv07",0,1,"192.168.90.13"}
+      ,{39,"medconv07",0,2,"192.168.90.13"}
+      ,{40,"medconv07",1,0,"192.168.90.14"}
+      ,{41,"medconv07",1,1,"192.168.90.14"}
+      ,{42,"medconv07",1,2,"192.168.90.14"}
+
+      ,{43,"medconv08",0,0,"192.168.90.15"}
+      ,{44,"medconv08",0,1,"192.168.90.15"}
+      ,{45,"medconv08",0,2,"192.168.90.15"}
+      ,{46,"medconv08",1,0,"192.168.90.16"}
+      ,{47,"medconv08",1,1,"192.168.90.16"}
+      ,{48,"medconv08",1,2,"192.168.90.16"}
+
+      ,{49,"medconv09",0,0,"192.168.90.17"}
+      ,{50,"medconv09",0,1,"192.168.90.17"}
+      ,{51,"medconv09",0,2,"192.168.90.17"}
+      ,{52,"medconv09",1,0,"192.168.90.18"}
+      ,{53,"medconv09",1,1,"192.168.90.18"}
+      ,{54,"medconv09",1,2,"192.168.90.18"}
+
+      ,{55,"medconv10",0,0,"192.168.90.19"}
+      ,{56,"medconv10",0,1,"192.168.90.19"}
+      ,{57,"medconv10",0,2,"192.168.90.19"}
+      ,{58,"medconv10",1,0,"192.168.90.20"}
+      ,{59,"medconv10",1,1,"192.168.90.20"}
+      ,{60,"medconv10",1,2,"192.168.90.20"}
     };
 
     for ( int loop = 0 ; loop < MAXINSTANCE ; loop++ ) {        // Check through all possible configurations
@@ -432,8 +464,8 @@ void *edt2flip()
     int raw_buf_for_dump = 0;                                           // The index number of the next one to write to
     UINT8 *raw_bufs;
     if ( posix_memalign((void **)&raw_bufs,4096,raw_bufs_to_dump*bufsize) != 0 ) raw_bufs = NULL;
-//    char my_debug_file[300];                                          // Room for the name of the debug files we're creating
-//    int debugfiledesc;                                                        // The file descriptor we'll use for our debug file writes
+    char my_debug_file[300];                                          // Room for the name of the debug files we're creating
+    int debugfiledesc;                                                        // The file descriptor we'll use for our debug file writes
 
     int packet_size_8 = 168;                                            // A receiver packet is 168 x 8bit bytes long.
     int packet_size_16 = packet_size_8 / 2;                             // A receiver packet is 84 x 16bit words long.
@@ -510,9 +542,9 @@ void *edt2flip()
           synced = FALSE;                                                               // if so, then we have lost sync and need to abort this one second buffer assembly and resync everything.
           printf("lost sync\n");
 
-//          printf( "lost : %d, %d, %d\n",next_packet_no, unpackhdr(&dma_buf_16[next_packet_ndx], &fibre_lane),fibre_lane );
-//          printf( "%d, %d\n",(next_packet_no+packets_per_buff-3)%packets_per_sec, unpackhdr(&dma_buf_16[next_packet_ndx+big_step_in], &fibre_lane) );
-//          printf( "%d\n",raw_buf_for_dump );
+          printf( "lost : %d, %d, %d\n",next_packet_no, unpackhdr(&dma_buf_16[next_packet_ndx], &fibre_lane),fibre_lane );
+          printf( "%d, %d\n",(next_packet_no+packets_per_buff-3)%packets_per_sec, unpackhdr(&dma_buf_16[next_packet_ndx+big_step_in], &fibre_lane) );
+          printf( "%d\n",raw_buf_for_dump );
 
           fflush(stdout);
 
@@ -601,7 +633,6 @@ void *edt2flip()
 
               failures_this_sec=0;                                                      // This might not be strictly true (ie 0 fails), but if we just kicked the card, then don't kick it again too soon.
 
-/*
               edt_disable_ring_buffers(edt_p);                                          // Give us the valuable low memory (<4GB) back
 
               if (edt_configure_ring_buffers(edt_p, bufsize, numbufs, EDT_READ, NULL) == -1) {
@@ -615,7 +646,7 @@ void *edt2flip()
               edt_flush_fifo(edt_p) ;                                                   // Flush the input fifo.  We only want new stuff!
 
               edt_start_buffers(edt_p, numbufs) ;                                       // restart the transfers and allow only numbufs before stopping
-*/
+
             }
 
             break;                                                                      // Whether the card is reset or not, this whole buffer is useless.
@@ -628,13 +659,22 @@ void *edt2flip()
           offset_to_nxt_sec = ((packets_per_sec-this_packet_no) % packets_per_sec) * packet_size_8 + (loop*2);  // when do we expect the beginning of the new second?
           if (offset_to_nxt_sec >= bufsize)  {printf("u"); fflush(stdout); break;}                              // The new second doesn't start inside this buffer.  Give up and get a new buffer.
 
-          // We did it!  We found a packet that contained the beginning of a fresh second.
+          // We did it!  We found a packet that contains the beginning of a fresh second.
 
-          Current_GPStime = (INT64)arrive_time.tv_sec - GPS_offset;                             // This will be timestamp that lives with this packet forever.
-          Current_GPStime_nsec = (int)arrive_time.tv_nsec-((bufsize-offset_to_nxt_sec)*34/9);   // Chars after start of packet 0 until the buffer fills seem to each take 34/9 nSecs to arrive. Rough only.
-                                                                                                // From empirical testing Current_GPStime_nsec ~= 97/98/99mS ie just under 1/10 second into the second.
+          Current_GPStime = (INT64)arrive_time.tv_sec - GPS_offset;                             // This will be GPS timestamp that lives with this packet forever.
+
+          // We only want to write the data from the beginning of the second. Not the whole buffer.
 
           memcpy( write_flip, dma_buf_8+offset_to_nxt_sec, written_to_flip=(bufsize-offset_to_nxt_sec) );       // Copy to the BEGINNING of the write buffer.
+
+          // We already know 'when' during the wall-clock second the full EDT buffer (containing the second roll-over) was given to us.
+          // Can we use that time *and* the amount of data following the roll-over (we were given at the same time) to estimate when we would have seen the second roll-over if there was no extra data after?
+          // Turns out each character takes ~4.650432 nSec to arrive.  (Calculated by best fit of 100 samples observed data on VCS01).
+          // I'd rather stick with integer maths though and that is around 2581/555ths.  I can't just multiply by 2581 though because that will likely exceed an int32.  Let's break this into chunks.
+          // * 89 / 37 * 29 / 15 is pretty darn close. (~4.650450) and won't overflow an int32 at any point so long as the buffer remaining is less than 23MB which is bigger than the whole buffer size.
+
+          Current_GPStime_nsec = (int)arrive_time.tv_nsec - ((((written_to_flip*89)/37)*29)/15);		// It's only an estimate. Close enough for government work I hope!
+          if ( Current_GPStime_nsec > 500000000 ) Current_GPStime_nsec -= 1000000000;				// With a little clock drift, the packet may arrive before it's sent
 
           next_packet_no = this_packet_no + packets_per_buff + 1;                       // What packet will the next buffer start with? Careful. It may need tweaking.
           next_packet_ndx = loop + packet_size_16 - packet_remainder;                   // Where in the buffer will it start? Careful. It may need tweaking.
@@ -646,7 +686,7 @@ void *edt2flip()
 
           synced = TRUE;                                                                // We've begun a second of data and we're all synced up.  We shouldn't need to do this again until a data glitch.
 
-          printf("\nAt %lld, %d found a start of second. Lane = %d.\n", Current_GPStime, Current_GPStime_nsec, fibre_lane);
+          printf("\nAt %lld, %d, found a start of second. Lane = %d. nsec = %d. w2f = %d.\n", Current_GPStime, (Current_GPStime_nsec+500)/1000, fibre_lane, (int)arrive_time.tv_nsec, written_to_flip );
 
           break;                                                                        // No point in carrying on the 'for' loop.
         }
@@ -665,14 +705,14 @@ void *edt2flip()
 
     edt_close(edt_p) ;                                                  // Pack away the toys and put them back in the drawers for next time.
 
-//    for ( loop=0; loop < raw_bufs_to_dump; loop++ ) {
-//      sprintf( my_debug_file, "3pip%d_%02d_%02d.raw", edt_channel, loop, raw_buf_for_dump );
-//      debugfiledesc = open( my_debug_file, O_WRONLY | O_CREAT, S_IRUSR | S_IWUSR | S_IWGRP | S_IRGRP | S_IROTH );
-//      if ( write( debugfiledesc, raw_bufs+(raw_buf_for_dump*bufsize), bufsize ) != bufsize ) printf( "Incomplete write\n" );
-//      close( debugfiledesc );
-//
-//      if ( ++raw_buf_for_dump == raw_bufs_to_dump ) raw_buf_for_dump = 0;             // Cycle througn to the next buffer
-//    }
+    for ( loop=0; loop < raw_bufs_to_dump; loop++ ) {
+      sprintf( my_debug_file, "3pip%d_%02d_%02d.raw", edt_channel, loop, raw_buf_for_dump );
+      debugfiledesc = open( my_debug_file, O_WRONLY | O_CREAT, S_IRUSR | S_IWUSR | S_IWGRP | S_IRGRP | S_IROTH );
+      if ( write( debugfiledesc, raw_bufs+(raw_buf_for_dump*bufsize), bufsize ) != bufsize ) printf( "Incomplete write\n" );
+      close( debugfiledesc );
+
+      if ( ++raw_buf_for_dump == raw_bufs_to_dump ) raw_buf_for_dump = 0;             // Cycle througn to the next buffer
+    }
 
     pthread_exit(NULL);
 }
@@ -1162,7 +1202,7 @@ void *udp2nic()
     int try_to_send;
     int actually_sent;
 
-    INT64 allowed_to_send_ever = 0;
+//    INT64 allowed_to_send_ever = 0;
     INT64 actually_sent_ever = 0;
 
     int fchan;
@@ -1186,7 +1226,7 @@ void *udp2nic()
 
       sprintf( multicast_ip, UDP_BASE_ADDR, loop );                                     // Construct the dotted quad for each channel
 
-printf( "%d:\"%s\"\n", loop, multicast_ip );
+//printf( "%d:\"%s\"\n", loop, multicast_ip );
 
       mn->sin_addr.s_addr=inet_addr(multicast_ip);                                      // Convert to addr format and store
 
@@ -1194,6 +1234,12 @@ printf( "%d:\"%s\"\n", loop, multicast_ip );
 
     }
 
+/*
+//---------- debug only!  Remove for production! ----------
+msg_name_all[ 9 ].sin_addr.s_addr = msg_name_all[ 10 ].sin_addr.s_addr;			// Debug only.  Must be removed for production.  This will force coarse channel 9 to send its data to where coarse channel 10 will (also) go
+msg_name_all[ 9 ].sin_port = msg_name_all[ 10 ].sin_port;				// The result will be no data to mwax09 and double data to mwax10!
+printf( "Redirecting multicast data from chan09 to chan10\n" );				// WIP REMOVE THESE LINES!!!
+*/
 //---------- Set up the control arrays for sendmmsg() ----------
 
     struct mmsghdr *UDP_msg = calloc ( UDP_PER_MC, sizeof( struct mmsghdr ) );          // Memory for 80000 udp mmsghdrs.  Set everything to zero.
@@ -1368,11 +1414,11 @@ OneSecBuffArray[our_buff].Buff_time );
 
 //            actually_sent = sendmmsg(sockfd, &UDP_msg[udp_sent], try_to_send, MSG_DONTWAIT);
 
-if ( terminate ) {
-  perror("sendmmsg()");
-  printf( "Tx-%d,%d,%d,%d\n", udp_sent, udp_2_send, try_to_send, actually_sent );
-  pthread_exit(NULL);
-}
+//if ( terminate ) {
+//  perror("sendmmsg()");
+//  printf( "Tx-%d,%d,%d,%d\n", udp_sent, udp_2_send, try_to_send, actually_sent );
+//  pthread_exit(NULL);
+//}
 
             if ( actually_sent > 0 ) {
               udp_2_send -= actually_sent;
@@ -1638,9 +1684,28 @@ int main(int argc, char **argv)
     }
 
 //---------------- Create a pool of observation metabin records and populate them ------------------------
-
 /*
-    UINT16 rri2rf_input[256] = {                                                                // RRI to rf_input LONG BASELINE
+    UINT16 rri2rf_input[256] = {                                                                // RRI to rf_input LONG BASELINE *with* RFIpole
+        4009,4008,4007,4006,4005,4004,4003,4002,4017,4016,4015,4014,4013,4012,4011,4010,
+        269,268,267,266,265,264,263,262,277,276,275,274,273,272,271,270,
+        4089,4088,4087,4086,4085,4084,4083,4082,4097,4096,4095,4094,4093,4092,4091,4090,
+        4105,4104,4103,4102,4101,4100,4099,4098,4113,4112,4111,4110,4109,4108,4107,4106,
+        109,108,107,106,105,104,103,102,117,116,115,114,113,112,111,110,
+        289,288,287,286,285,284,283,282,297,296,295,294,293,292,291,290,
+        149,148,147,146,145,144,143,142,157,156,155,154,153,152,151,150,
+        4025,4024,4023,4022,4021,4020,4019,4018,4033,4032,4031,4030,4029,4028,4027,4026,
+        4057,4056,4055,4054,4053,4052,4051,4050,4065,4064,4063,4062,4061,4060,4059,4058,
+        209,208,1999,1998,205,204,203,202,217,216,215,214,213,212,211,210,
+        229,228,227,226,225,224,223,222,237,236,235,234,233,232,231,230,
+        249,248,247,246,245,244,243,242,257,256,255,254,253,252,251,250,
+        4073,4072,4071,4070,4069,4068,4067,4066,4081,4080,4079,4078,4077,4076,4075,4074,
+        4041,4040,4039,4038,4037,4036,4035,4034,4049,4048,4047,4046,4045,4044,4043,4042,
+        309,308,307,306,305,304,303,302,317,316,315,314,313,312,311,310,
+        329,328,327,326,325,324,323,322,337,336,335,334,333,332,331,330
+    };
+
+
+    UINT16 rri2rf_input[256] = {                                                                // RRI to rf_input LONG BASELINE *without* RFIpole
         4009,4008,4007,4006,4005,4004,4003,4002,4017,4016,4015,4014,4013,4012,4011,4010,
         269,268,267,266,265,264,263,262,277,276,275,274,273,272,271,270,
         4089,4088,4087,4086,4085,4084,4083,4082,4097,4096,4095,4094,4093,4092,4091,4090,
@@ -1659,7 +1724,6 @@ int main(int argc, char **argv)
         329,328,327,326,325,324,323,322,337,336,335,334,333,332,331,330
     };
 */
-
     UINT16 rri2rf_input[256] = {                                                                // RRI to rf_input SHORT BASELINE
 	29,28,27,26,25,24,23,22,37,36,35,34,33,32,31,30,
 	69,68,67,66,65,64,63,62,77,76,75,74,73,72,71,70,
@@ -1760,262 +1824,4 @@ int main(int argc, char **argv)
 4082,4083,4084,4085,4086,4087,4088,4089,4090,4091,4092,4093,4094,4095,4096,4097,
 4098,4099,4100,4101,4102,4103,4104,4105,4106,4107,4108,4109,4110,4111,4112,4113
 }
-*/
-/*
-Tile051X
-Tile051Y
-Tile052X
-Tile052Y
-Tile053X
-Tile053Y
-Tile054X
-Tile054Y
-Tile055X
-Tile055Y
-Tile056X
-Tile056Y
-Tile057X
-Tile057Y
-Tile058X
-Tile058Y
-Tile071X
-Tile071Y
-Tile072X
-Tile072Y
-Tile073X
-Tile073Y
-Tile074X
-Tile074Y
-Tile075X
-Tile075Y
-Tile076X
-Tile076Y
-Tile077X
-Tile077Y
-Tile078X
-Tile078Y
-Tile101X
-Tile101Y
-Tile102X
-Tile102Y
-Tile103X
-Tile103Y
-Tile104X
-Tile104Y
-Tile105X
-Tile105Y
-Tile106X
-Tile106Y
-Tile107X
-Tile107Y
-Tile108X
-Tile108Y
-Tile111X
-Tile111Y
-Tile112X
-Tile112Y
-Tile113X
-Tile113Y
-Tile114X
-Tile114Y
-Tile115X
-Tile115Y
-Tile116X
-Tile116Y
-Tile117X
-Tile117Y
-Tile118X
-Tile118Y
-Tile121X
-Tile121Y
-Tile122X
-Tile122Y
-Tile123X
-Tile123Y
-Tile124X
-Tile124Y
-Tile125X
-Tile125Y
-Tile126X
-Tile126Y
-Tile127X
-Tile127Y
-Tile128X
-Tile128Y
-Tile131X
-Tile131Y
-Tile132X
-Tile132Y
-Tile133X
-Tile133Y
-Tile134X
-Tile134Y
-Tile135X
-Tile135Y
-Tile136X
-Tile136Y
-Tile137X
-Tile137Y
-Tile138X
-Tile138Y
-Tile141X
-Tile141Y
-Tile142X
-Tile142Y
-Tile143X
-Tile143Y
-Tile144X
-Tile144Y
-Tile145X
-Tile145Y
-Tile146X
-Tile146Y
-Tile147X
-Tile147Y
-Tile148X
-Tile148Y
-Tile151X
-Tile151Y
-Tile152X
-Tile152Y
-Tile153X
-Tile153Y
-Tile154X
-Tile154Y
-Tile155X
-Tile155Y
-Tile156X
-Tile156Y
-Tile157X
-Tile157Y
-Tile158X
-Tile158Y
-Tile161X
-Tile161Y
-Tile162X
-Tile162Y
-Tile163X
-Tile163Y
-Tile164X
-Tile164Y
-Tile165X
-Tile165Y
-Tile166X
-Tile166Y
-Tile167X
-Tile167Y
-Tile168X
-Tile168Y
-LBA1X
-LBA1Y
-LBA2X
-LBA2Y
-LBA3X
-LBA3Y
-LBA4X
-LBA4Y
-LBA5X
-LBA5Y
-LBA6X
-LBA6Y
-LBA7X
-LBA7Y
-LBA8X
-LBA8Y
-LBB1X
-LBB1Y
-LBB2X
-LBB2Y
-LBB3X
-LBB3Y
-LBB4X
-LBB4Y
-LBB5X
-LBB5Y
-LBB6X
-LBB6Y
-LBB7X
-LBB7Y
-LBB8X
-LBB8Y
-LBC1X
-LBC1Y
-LBC2X
-LBC2Y
-LBC3X
-LBC3Y
-LBC4X
-LBC4Y
-LBC5X
-LBC5Y
-LBC6X
-LBC6Y
-LBC7X
-LBC7Y
-LBC8X
-LBC8Y
-LBD1X
-LBD1Y
-LBD2X
-LBD2Y
-LBD3X
-LBD3Y
-LBD4X
-LBD4Y
-LBD5X
-LBD5Y
-LBD6X
-LBD6Y
-LBD7X
-LBD7Y
-LBD8X
-LBD8Y
-LBE1X
-LBE1Y
-LBE2X
-LBE2Y
-LBE3X
-LBE3Y
-LBE4X
-LBE4Y
-LBE5X
-LBE5Y
-LBE6X
-LBE6Y
-LBE7X
-LBE7Y
-LBE8X
-LBE8Y
-LBF1X
-LBF1Y
-LBF2X
-LBF2Y
-LBF3X
-LBF3Y
-LBF4X
-LBF4Y
-LBF5X
-LBF5Y
-LBF6X
-LBF6Y
-LBF7X
-LBF7Y
-LBF8X
-LBF8Y
-LBG1X
-LBG1Y
-LBG2X
-LBG2Y
-LBG3X
-LBG3Y
-LBG4X
-LBG4Y
-LBG5X
-LBG5Y
-LBG6X
-LBG6Y
-LBG7X
-LBG7Y
-LBG8X
-LBG8Y
 */
