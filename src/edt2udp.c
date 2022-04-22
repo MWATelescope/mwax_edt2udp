@@ -5,6 +5,8 @@
 // Author(s)  BWC Brian Crosse brian.crosse@curtin.edu.au
 // Commenced 2018-07-04
 //
+// 3.00a-031    2021-10-20 BWC  Improve health info and provide more details about EDT blocks that lose sync.
+//
 // 3.00a-030    2021-10-13 BWC  Send health data packets to 224.0.2.2:8003
 //
 // 3.00a-029    2021-10-11 BWC  Add logging on transmission of a good second from the flip2buff thread
@@ -100,7 +102,6 @@
 //              Clobber the last 1279998 time stamp with 1279999 as it's added to the flip buffer
 //              Update character rate calculation from 34/9
 //              Change file name to reflect receiver and fibre number
-//              Re-enable 'kick EDT in teeth'
 //              Re-enable CPU affinity
 //              Make buffer size a command line parameter and play with values
 //              Try to make 1279998/1279999 check better able to handle both corrected and uncorrected data
@@ -109,7 +110,7 @@
 
 #define _GNU_SOURCE
 
-#define BUILD 30
+#define BUILD 31
 #define WORKINGCHAN 8
 
 #include "edtinc.h"
@@ -502,7 +503,7 @@ void *edt2flip()
     EdtDev *edt_p;
 
     INT64 Current_GPStime = 0;                                          // The GPS time of the one second block we're currently assembling
-    INT32 Current_GPStime_nsec;                                         // nsecs after GPStime we estimate packet 0 hit the input to the EDT card.  Adjusted by its location in buffer
+//    INT32 Current_GPStime_nsec;                                         // nsecs after GPStime we estimate packet 0 hit the input to the EDT card.  Adjusted by its location in buffer
 
 //    INT64 GPStime_of_fail = -1;                                         // -1 means never failed (since start of process)
 //    int failures_this_sec = 0;                                          // We'll be watching this to decide if the EDT card has lost DMA buffer consistency like after an fPBF 1st fibre reset
@@ -510,12 +511,14 @@ void *edt2flip()
 
     int bufsize = edtbufsize*1024*1024;                                 // Size for EDT cards DMA buffer.  Comes out of bottom 4GB.  Allocated by EDT drivers.
 
+/*
     int raw_bufs_to_dump = 99;                                          // For debugging, we will keep this many raw EDT buffers to look at after closedown
     int raw_buf_for_dump = 0;                                           // The index number of the next one to write to
     UINT8 *raw_bufs;
     if ( posix_memalign((void **)&raw_bufs,4096,raw_bufs_to_dump*bufsize) != 0 ) raw_bufs = NULL;
     char my_debug_file[300];                                          // Room for the name of the debug files we're creating
     int debugfiledesc;                                                        // The file descriptor we'll use for our debug file writes
+*/
 
     int packet_size_8 = 168;                                            // A receiver packet is 168 x 8bit bytes long.
     int packet_size_16 = packet_size_8 / 2;                             // A receiver packet is 84 x 16bit words long.
@@ -541,6 +544,12 @@ void *edt2flip()
     int loop, next_packet_ndx = 0;                                      // Initialise to keep -Wall warnings happy.
     int this_packet_no, next_packet_no = 0;
     int offset_to_nxt_sec;
+
+    int last_good_packet_no;						// When saving a glitched buffer, what was the last good header before the glitch?
+    UINT16 *last_good_packet_ptr;					// where was it?
+    int last_packet_to_check;						// which was the packet near the end that we discovered was bad?
+    int check_packet_no;						// What packet after the glitch seemed to have a good header again?
+    UINT16 *check_packet_ptr;						// where was it?
 
     int written_to_flip = 0;                                            // Number of bytes already written to the flip buffer
     UINT8 *write_flip;
@@ -618,10 +627,72 @@ void *edt2flip()
 
           synced = FALSE;                                                               // if so, then we have lost sync and need to abort this one second buffer assembly and resync everything.
 
-          printf("lost sync:  ");
+//---------- we have lost sync. Let's try to find out what's the matter with the block even if it takes some time ----------
+
+          if (next_packet_no == unpackhdr(&dma_buf_16[next_packet_ndx], &fibre_lane) ) {	// If the beginning of the buffer is good then it's probably some lost data in the buffer (rather than complete junk)
+
+            // lets look through each packet from here to check its header looks okay.  When we get to one that *isn't* okay we'll assume we can trust all the packets up to (but not including) the last good header.
+            // then we'll look for nice looking packet headers starting from immediately after the last good header before the glitch.  We'll need to check (just under) two whole packet lengths though if we looking for
+            // a single burst of lost bytes.  That's because the burst could have lost (for example) just the header of an RRI packet.  Then there'd be two payloads from the last good header until the start of the usable
+            // post glitch data.
+            // Once all this is done we may be able to recover both the data before the glitch and after, exclusive of any whole packets that were damaged
+            // (less some complications around broken headers hurting the preceding packet)
+
+            last_good_packet_no = next_packet_no;					// We wouldn't be here if this packet wasn't good, so it's the earliest good one we know
+            last_good_packet_ptr = &dma_buf_16[next_packet_ndx];			// and this is where we already worked out it was
+
+            last_packet_to_check = (next_packet_no+packets_per_buff-3)%packets_per_sec;	// and things have gone bad by this packet, or (again) we wouldn't be here.
+
+            check_packet_no = (last_good_packet_no + 1) % packets_per_sec;		// Let's start further testing from here.  NB It may have rolled over the count back to zero (ie next seconds data)
+            check_packet_ptr = last_good_packet_ptr + packet_size_16;			// Set pointer to the next packet. NB the pointer isn't a pointer to a packet structure. It's a pointer to a UINT16.
+
+            while ( check_packet_no != last_packet_to_check ) {				// We know that last packet is bad because its failure is how we got here (see outer 'if' statement)
+
+              if ( check_packet_no != unpackhdr( check_packet_ptr, &fibre_lane ) ) break;	// Does packet number 'check_packet_no' have a good header? NB: Even if it does, its payload could still be toast
+
+              last_good_packet_no = check_packet_no;					// This is now the last one we know is good
+              last_good_packet_ptr = check_packet_ptr;					// and this is where we already worked out it was
+
+              check_packet_ptr += packet_size_16;					// Increment pointer to the next packet. NB the pointer isn't a pointer to a packet structure. It's a pointer to a UINT16.
+              check_packet_no = (check_packet_no + 1) % packets_per_sec;		// increment the packet number. Check for roll-over and get set for the next test.
+
+            }
+
+            // We now know that everything is fine in the buffer, right up to the beginning of the header for packet number 'last_good_packet_no'.  That packet itself can't be trusted though
+            // Now lets see if it goes good again after that.
+
+            check_packet_ptr = last_good_packet_ptr + 3;				// Start looking at the first byte after the last good header (Headers are 6 bytes, ie 3 * sizeof(UINT16) in length)
+
+            for ( loop=0; loop < (packet_size_16+packet_size_16); loop++ ) {		// Look for twice the length of a packet for reasons explained above
+
+              check_packet_no = unpackhdr( check_packet_ptr, &fibre_lane);		// Have a try to see if this looks valid. NB: It needs to be the same fibre lane as before!
+
+              if ( check_packet_no >= 0 ) {						// Wow. It looks valid.  Maybe we're back in Kansas and can use the data from here. We need more checking to know for sure.
+                // If we are fully synchronized and there was only one burst of lost characters, then we will be able to step through each one to the end of the buffer
+
+                printf("\n Possible recovery: npn=%d, np_ndx=%d, lgpn=%d, lgp_ndx=%ld, cpn=%d, cp_ndx=%ld, dist=%ld, lost=%ld",		//
+                  next_packet_no,													//
+                  next_packet_ndx,													//
+                  last_good_packet_no,													//
+                  ( last_good_packet_ptr - dma_buf_16 ),										//
+                  check_packet_no,													//
+                  ( check_packet_ptr - dma_buf_16 ),											//
+                  ( last_good_packet_ptr - check_packet_ptr ),										//
+                  ( check_packet_no - last_good_packet_no ) * packet_size_8 - ( 2 * ( last_good_packet_ptr - check_packet_ptr ) ) );
+
+                break;
+              }
+
+              check_packet_ptr++;							// Move on a couple of bytes.  NB: The EDT card data is always aligned on 16bit (not byte) boundaries
+            }
+
+          }
+
+          printf("\nlost sync:  ");
           printf( "%d, %d, %d; ",next_packet_no, unpackhdr(&dma_buf_16[next_packet_ndx], &fibre_lane),fibre_lane );
-          printf( "%d, %d, ", (next_packet_no+packets_per_buff-3)%packets_per_sec, unpackhdr(&dma_buf_16[next_packet_ndx+big_step_in], &fibre_lane) );
-          printf( "%d\n",raw_buf_for_dump );
+          printf( "%d, %d", (next_packet_no+packets_per_buff-3)%packets_per_sec, unpackhdr(&dma_buf_16[next_packet_ndx+big_step_in], &fibre_lane) );
+//          printf( ", %d",raw_buf_for_dump );
+          printf( "\n" );
 
           fflush(stdout);
 
@@ -746,21 +817,18 @@ void *edt2flip()
 
           // We did it!  We found a packet that contains the beginning of a fresh second.
 
-          Current_GPStime = (INT64)arrive_time.tv_sec - GPS_offset;                     // This will be GPS timestamp that lives with this packet forever.
+          Current_GPStime = (INT64)arrive_time.tv_sec - GPS_offset;                     // This will be GPS timestamp that lives with this packet forever.  Convert linux to GPS time.
+          if ( (int)arrive_time.tv_nsec > 950000000 ) {					// but the ntp clock might be slightly out, so if we're within 50mS of the *end* of a second according to our clock
+            Current_GPStime++;								// we'll assume it's in the next actual second somewhere close to the beginning
+          }
 
           // We only want to write the data from the beginning of the second. Not the whole buffer.
           memcpy( write_flip, dma_buf_8+offset_to_nxt_sec, written_to_flip=(bufsize-offset_to_nxt_sec) );       // Copy to the BEGINNING of the write buffer.
 
-          // We already know 'when' during the wall-clock second the full EDT buffer (containing the second roll-over) was given to us.
-          // Can we use that time *and* the amount of data following the roll-over (we were given at the same time) to estimate when we would have seen the second roll-over if there was no extra data after?
-          // Turns out each character takes ~4.650432 nSec to arrive.  (Calculated by best fit of 100 samples observed data on VCS01).
-          // I'd rather stick with integer maths though and that is around 2581/555ths.  I can't just multiply by 2581 though because that will likely exceed an int32.  Let's break this into chunks.
-          // * 89 / 37 * 29 / 15 is pretty darn close. (~4.650450) and won't overflow an int32 at any point so long as the buffer remaining is less than 23MB which is bigger than the whole buffer size.
-
           sec_start_time = arrive_time;							// Time that the first buffer for this second is handed to the application
           sec_start2end = written_to_flip;						// and this is how many bytes of the new second were in that buffer (used for estimating the rollover time)
 
-          Current_GPStime_nsec = (int)arrive_time.tv_nsec - ((((written_to_flip*89)/37)*29)/15);		// It's only an estimate. Close enough for government work I hope!
+//          Current_GPStime_nsec = (int)arrive_time.tv_nsec - ((((written_to_flip*89)/37)*29)/15);		// It's only an estimate. Close enough for government work I hope!
 //          if ( Current_GPStime_nsec > 500000000 ) Current_GPStime_nsec -= 1000000000;				// With a little clock drift, the packet may arrive before it's sent
 
           next_packet_no = this_packet_no + packets_per_buff + 1;                       // What packet will the next buffer start with? Careful. It may need tweaking.
@@ -773,7 +841,7 @@ void *edt2flip()
 
           synced = TRUE;                                                                // We've begun a second of data and we're all synced up.  We shouldn't need to do this again until a data glitch.
 
-          printf("\n%lld.%06d, found start of second. Rec%02d:%d. Lane = %d. nsec = %d. w2f = %d.\n", Current_GPStime, (Current_GPStime_nsec+500)/1000, (fibre_lane+3)/3, (fibre_lane % 3), fibre_lane, (int)arrive_time.tv_nsec, written_to_flip );
+          printf("\n%lld: found start of second for Rec%02d:%d.\n", Current_GPStime, (fibre_lane+3)/3, (fibre_lane % 3) );
           fflush(stdout);
 
           break;                                                                        // No point in carrying on the 'for' loop.
@@ -793,6 +861,7 @@ void *edt2flip()
 
     edt_close(edt_p) ;                                                  // Pack away the toys and put them back in the drawers for next time.
 
+/*
     for ( loop=0; loop < raw_bufs_to_dump; loop++ ) {
       sprintf( my_debug_file, "3pip%d_%02d_%02d.raw", edt_channel, loop, raw_buf_for_dump );
       debugfiledesc = open( my_debug_file, O_WRONLY | O_CREAT, S_IRUSR | S_IWUSR | S_IWGRP | S_IRGRP | S_IROTH );
@@ -801,6 +870,7 @@ void *edt2flip()
 
       if ( ++raw_buf_for_dump == raw_bufs_to_dump ) raw_buf_for_dump = 0;             // Cycle througn to the next buffer
     }
+*/
 
     fflush(stdout);
     pthread_exit(NULL);
@@ -1071,19 +1141,35 @@ void *flip2buff()
 
       health_GPS_start_sec = (INT64)health_sec_start_time.tv_sec - GPS_offset;		// Convert the linux arrival time to GPS seconds
       health_GPS_start_nsec = (int) health_sec_start_time.tv_nsec;	// and grab the fractional second component
-      health_est_lag_time = ((( (health_sec_start2end*89) /37)*29)/15);	// The estimated lag time from the start of a second, until the first edt block is handed to us in nsec
 
-      printf( "\n%lld.%09d: lag=%09d, est=%d, assigned=%lld, lost=%lld, Rec%02d:%d (%d), pid=%d, id=%d, %s, %d, %d, %d, offset=%d",
+      printf( "\n%lld.%09d:", health_GPS_start_sec, health_GPS_start_nsec );	// Log the time the first edt packet arrived for this second before we tweak it
+
+      if ( health_GPS_start_sec == (health_Buff_time-1) ) {		// If the wall clock still said it was the previous second (presumably right near the end of it)
+        health_GPS_start_sec++;						// then convert it to be the beginning of the next second
+        health_GPS_start_nsec -= 1000000000;				// and give it a -ve 'nsec' fractional part
+      }
+
+      // We already know 'when' during the wall-clock second the full EDT buffer (containing the second roll-over) was given to us.
+      // Can we use that time *and* the amount of data following the roll-over (we were given at the same time) to estimate when we would have seen the second roll-over if there was no extra data after?
+      // Turns out each character takes ~4.650432 nSec to arrive.  (Calculated by best fit of 100 samples observed data on VCS01).
+      // I'd rather stick with integer maths though and that is around 2581/555ths.  I can't just multiply by 2581 though because that will likely exceed an int32.  Let's break this into chunks.
+      // * 89 / 37 * 29 / 15 is pretty darn close. (~4.650450) and won't overflow an int32 at any point so long as the buffer remaining is less than 23MB which is bigger than the whole buffer size.
+
+      health_est_lag_time = ((( (health_sec_start2end*89) /37)*29)/15);	// The estimated lag time from the start of a second, until the first edt block is handed to us in nsec
+      health_GPS_start_nsec -= health_est_lag_time;			// and remove the estimated extra time the receiver and EDT card spend sending us data in the new second
+
+      if ( health_GPS_start_sec != health_Buff_time ) {			// If these don't match now, something we don't understand is happening!
+        health_GPS_start_nsec = -1000000000;				// so set an impossible nsec time to warn M&C via the health packets
+      }
+
+      printf( " %lld:%10d, lost=%lld, Rec%02d:%d, lane=%d, pid=%d, id=%d, %s, %d, %d, %d, offset=%d",
         health_GPS_start_sec,
         health_GPS_start_nsec,
-        health_est_lag_time,
-        health_GPS_start_nsec - health_est_lag_time,
-        health_Buff_time,
         (health_Buff_time - health_last_Buff_time - 1),
         health_rec,
         health_fibre3,
         health_fibre_lane,
-        getpid(),
+        health.pid,
         conf.edt2udp_id,
         conf.host,
         conf.edt_unit,
@@ -1096,7 +1182,7 @@ void *flip2buff()
       // Now populate the packet structure directly in memory
 
       health.GPS_time = health_Buff_time;
-      health.arrival_offset = health_GPS_start_nsec - health_est_lag_time;
+      health.arrival_offset = health_GPS_start_nsec;
       health.last_GPS_time = health_last_Buff_time;
       health.receiver = health_rec;
       health.fibre3 = health_fibre3;
@@ -1109,7 +1195,7 @@ void *flip2buff()
         fflush(stdout);
       }
 
-      // Now reset the error counts.  NB: There is a small windo where we may lose an increment, but they are only a guide and not critical to know, so ignore that possibility
+      // Now reset the error counts.  NB: There is a small window where we may lose an increment, but they are only a guide and not critical to know, so ignore that possibility
       health.seen_unusable = 0;						// How many 'unusable' blocks seen since the last health packet (clips at 255.  Treat as 'zero' or 'non-zero' flag)
       health.seen_junk = 0;						// How many 'junk' blocks seen since the last health packet (clips at 255.  Treat as 'zero' or 'non-zero' flag)
       health.seen_badsync = 0;						// How many times did the decoding thread indicate bad or no sync since the last health packet (clips at 255.  Treat as 'zero' or 'non-zero' flag)
