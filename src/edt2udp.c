@@ -5,6 +5,9 @@
 // Author(s)  BWC Brian Crosse brian.crosse@curtin.edu.au
 // Commenced 2018-07-04
 //
+// 3.00a-028    2021-10-07 BWC  Change log output for easier receiver startup status checking.  More 'fflush(stdout);'
+//				Add support for a SIGUSR1 to force an EDT card ring buffer reset 
+//
 // 3.00a-027    2021-09-14 BWC  Update all the IP addresses for medconv01 -> medconv10
 //
 // 3.00a-026    2021-08-23 BWC  Add timing information to help identify receivers which are not correctly programmed
@@ -102,7 +105,7 @@
 
 #define _GNU_SOURCE
 
-#define BUILD 27
+#define BUILD 28
 #define WORKINGCHAN 8
 
 #include "edtinc.h"
@@ -249,6 +252,8 @@ typedef struct metabin {
 #define MAX_OBS_IDS (8)
 
 volatile BOOL terminate = FALSE;                        // Global request for everyone to close down
+volatile BOOL kick_edt = FALSE;				// Global request (probably from a sigusr1 signal sent to us) that we should reset all the EDT card ring buffers
+
 volatile INT64 OneSecBuff_Sec = 0;                      // GPS_Time of the latest block completely handed off to 'buff2udp' worker thread
 volatile INT64 OneSecBuff_udp = 0;                      // GPS_Time of the latest block completely handed off to 'udp2nic' worker thread
 volatile BOOL checkifwriteneeded = FALSE;               // We need to check if there is an early buffer that needs to be written to disk.  False positive allowed.
@@ -446,6 +451,7 @@ void read_config ( char *us, int edtu, int edtc, medconv_config_t *config )
 void *edt2flip()
 {
     printf("edt2flip started\n");
+    fflush(stdout);
 
 //---------------- Initialize and declare variables ------------------------
 
@@ -504,12 +510,14 @@ void *edt2flip()
 
     if ((edt_p = edt_open_channel(EDT_INTERFACE, edt_unit, edt_channel)) == NULL) {     // Is the EDT card installed and alive?
       printf("edt_open_channel failed\n");
+      fflush(stdout);
       terminate = TRUE;                                                         // This is fatal.  Tell everyone to pack up and go home.
       pthread_exit(NULL);
     }
 
     if (edt_configure_ring_buffers(edt_p, bufsize, numbufs, EDT_READ, NULL) == -1) {
       printf("Unable to configure %d ring-buffers of %d bytes\n", numbufs, bufsize);
+      fflush(stdout);
       terminate = TRUE;                                                 // This is fatal.  Tell everyone to pack up and go home.
       pthread_exit(NULL);
     }
@@ -523,6 +531,25 @@ void *edt2flip()
 //---------------- Main EDT reading loop ------------------------
 
     while(!terminate) {
+
+      if ( kick_edt ) {									// Are we supposed to reset all the EDT ring buffers?  'cos if we are...
+        edt_disable_ring_buffers(edt_p);						// get back the valuable low memory (<4GB)
+
+        if (edt_configure_ring_buffers(edt_p, bufsize, numbufs, EDT_READ, NULL) == -1) {	// recreate the buffers, but if that failed
+          printf("Unable to configure %d ring-buffers of %d bytes\n", numbufs, bufsize);
+          fflush(stdout);
+          terminate = TRUE;								// we made things worse and we should terminate
+          pthread_exit(NULL);
+        }
+
+        edt_set_rtimeout(edt_p,1000);							// Set card to time out all reads after 1 second.  Probably not needed, but can't hurt right?
+        edt_flush_fifo(edt_p) ;                                                   	// Flush the input fifo.  We only want new stuff!
+        edt_start_buffers(edt_p, numbufs) ;                                       	// restart the transfers and allow only numbufs before stopping
+        kick_edt = FALSE;
+
+        printf("EDT Card ring buffer reset performed\n");				// Write it to the log
+        fflush(stdout);
+      }
 
       dma_buf_8 = edt_wait_for_buffers(edt_p, 1);                                       // Get the data from the card OR if it was a timeout get a buffer of useless junk.
       edt_start_buffers(edt_p, 1);                                                      // Tell the card we can handle one more buffer now that we swallowed one.
@@ -540,10 +567,10 @@ void *edt2flip()
             ((next_packet_no+packets_per_buff-3)%packets_per_sec != unpackhdr(&dma_buf_16[next_packet_ndx+big_step_in], &fibre_lane))) {        // is a packet right near the *end* unbelievable
 
           synced = FALSE;                                                               // if so, then we have lost sync and need to abort this one second buffer assembly and resync everything.
-          printf("lost sync\n");
 
-          printf( "lost : %d, %d, %d\n",next_packet_no, unpackhdr(&dma_buf_16[next_packet_ndx], &fibre_lane),fibre_lane );
-          printf( "%d, %d\n",(next_packet_no+packets_per_buff-3)%packets_per_sec, unpackhdr(&dma_buf_16[next_packet_ndx+big_step_in], &fibre_lane) );
+          printf("lost sync:  ");
+          printf( "%d, %d, %d; ",next_packet_no, unpackhdr(&dma_buf_16[next_packet_ndx], &fibre_lane),fibre_lane );
+          printf( "%d, %d, ", (next_packet_no+packets_per_buff-3)%packets_per_sec, unpackhdr(&dma_buf_16[next_packet_ndx+big_step_in], &fibre_lane) );
           printf( "%d\n",raw_buf_for_dump );
 
           fflush(stdout);
@@ -637,6 +664,7 @@ void *edt2flip()
 
               if (edt_configure_ring_buffers(edt_p, bufsize, numbufs, EDT_READ, NULL) == -1) {
                 printf("Unable to configure %d ring-buffers of %d bytes\n", numbufs, bufsize);
+                fflush(stdout);
                 terminate = TRUE;                                                       // This is fatal.  Tell everyone to pack up and go home.
                 pthread_exit(NULL);
               }
@@ -664,7 +692,6 @@ void *edt2flip()
           Current_GPStime = (INT64)arrive_time.tv_sec - GPS_offset;                             // This will be GPS timestamp that lives with this packet forever.
 
           // We only want to write the data from the beginning of the second. Not the whole buffer.
-
           memcpy( write_flip, dma_buf_8+offset_to_nxt_sec, written_to_flip=(bufsize-offset_to_nxt_sec) );       // Copy to the BEGINNING of the write buffer.
 
           // We already know 'when' during the wall-clock second the full EDT buffer (containing the second roll-over) was given to us.
@@ -674,7 +701,8 @@ void *edt2flip()
           // * 89 / 37 * 29 / 15 is pretty darn close. (~4.650450) and won't overflow an int32 at any point so long as the buffer remaining is less than 23MB which is bigger than the whole buffer size.
 
           Current_GPStime_nsec = (int)arrive_time.tv_nsec - ((((written_to_flip*89)/37)*29)/15);		// It's only an estimate. Close enough for government work I hope!
-          if ( Current_GPStime_nsec > 500000000 ) Current_GPStime_nsec -= 1000000000;				// With a little clock drift, the packet may arrive before it's sent
+
+//          if ( Current_GPStime_nsec > 500000000 ) Current_GPStime_nsec -= 1000000000;				// With a little clock drift, the packet may arrive before it's sent
 
           next_packet_no = this_packet_no + packets_per_buff + 1;                       // What packet will the next buffer start with? Careful. It may need tweaking.
           next_packet_ndx = loop + packet_size_16 - packet_remainder;                   // Where in the buffer will it start? Careful. It may need tweaking.
@@ -686,7 +714,8 @@ void *edt2flip()
 
           synced = TRUE;                                                                // We've begun a second of data and we're all synced up.  We shouldn't need to do this again until a data glitch.
 
-          printf("\nAt %lld, %d, found a start of second. Lane = %d. nsec = %d. w2f = %d.\n", Current_GPStime, (Current_GPStime_nsec+500)/1000, fibre_lane, (int)arrive_time.tv_nsec, written_to_flip );
+          printf("\n%lld.%06d, found start of second. Rec%02d:%d. Lane = %d. nsec = %d. w2f = %d.\n", Current_GPStime, (Current_GPStime_nsec+500)/1000, (fibre_lane+3)/3, (fibre_lane % 3), fibre_lane, (int)arrive_time.tv_nsec, written_to_flip );
+          fflush(stdout);
 
           break;                                                                        // No point in carrying on the 'for' loop.
         }
@@ -714,6 +743,7 @@ void *edt2flip()
       if ( ++raw_buf_for_dump == raw_bufs_to_dump ) raw_buf_for_dump = 0;             // Cycle througn to the next buffer
     }
 
+    fflush(stdout);
     pthread_exit(NULL);
 }
 
@@ -739,6 +769,7 @@ void *flip2buff()
     usleep(500000);                                                     // Give edt2flip enough time to lock the mutex on flip buffer 0.  First packet can't be for at least 1 second anyway.
 
     printf("\nflip2buff started\n");
+    fflush(stdout);
 
     while(TRUE) {
       pthread_mutex_lock( &FlipBuffArray[flip].Buff_mx );               // Get a lock on the mutex associated with the buffer that is being written to, and just finished when this lock succeeds.
@@ -756,6 +787,7 @@ void *flip2buff()
 
       if ( my->Buff_ptr != FlipBuffArray[flip].Buff_ptr ) {             // ASSERT if these don't match.  We must have a bug.  It should have been there since the original Malloc.
         printf("\nASSERT: Flip buffer pointer doesn't match main array pointer\n");
+        fflush(stdout);
         terminate = TRUE;
         pthread_mutex_unlock( &FlipBuffArray[flip].Buff_mx );           // Release the mutex so everyone can close down
         pthread_exit(NULL);
@@ -843,6 +875,7 @@ void *flip2buff()
 
       if (new_ndx == -1) {                                              // ASSERT if we don't have a buffer to use yet.  There are supposed to be more buffers than threads that can get read locks
         printf("\nASSERT: No unlocked buffers found\n");
+        fflush(stdout);
         terminate = TRUE;
         pthread_mutex_unlock( &FlipBuffArray[flip].Buff_mx );           // Release the mutex so everyone can close down
         pthread_exit(NULL);
@@ -952,6 +985,7 @@ void *buff2udp()
     }
 
     printf("buff2udp started\n");
+    fflush(stdout);
 
     while ( !terminate ) {                                              // Keep going until we are told to stop
 
@@ -1146,12 +1180,15 @@ OneSecBuffArray[our_buff].Buff_time );
 
               rri2udp++;                                                                        // That's one more rri packet processed.  Equivalent in work to 1/16 of the udp packet generated
 
-source_ptr += (CHANPERPACKET - WORKINGCHAN) * 5;
+              source_ptr += (CHANPERPACKET - WORKINGCHAN) * 5;					// If we are only writing a subset of the 8 channels, then we need to skip some data
 
               header1 = *source_ptr++;
               header2 = *source_ptr++;          // We need to step over the 16 bits of checksum, and the 3 x 16bit header of the next source packet.  source_ptr is a pointer to UINT32 so that's just +=2
 
-              if ( (( header1 >> 16 ) != 0x0800) & (subsec != 624) & (sample != 2047) ) printf( "Bad sync subs=%d, smpl=%d.  Hdr1=%d, Hdr2=%d\n", subsec, sample, header1, header2 );
+              if ( (( header1 >> 16 ) != 0x0800) & (subsec != 624) & (sample != 2047) ) {
+                printf( "Bad sync subs=%d, smpl=%d.  Hdr1=%d, Hdr2=%d\n", subsec, sample, header1, header2 );
+                fflush(stdout);
+              }
 
               d_sample_ptr += d_sample_step;                                                    // We step right a single time step and point to the 1st input and channel for the next sample time (not whole subsec)
 
@@ -1186,6 +1223,7 @@ source_ptr += (CHANPERPACKET - WORKINGCHAN) * 5;
 void *udp2nic()
 {
     printf("udp2nic started\n");
+    fflush(stdout);
 
 //    INT64 udp_upto = 10000;                                     // GPS time of the last second we have looked at.  Unless checkifwriteneeded is true, only times after this are worth looking at.
 
@@ -1299,6 +1337,7 @@ printf( "Redirecting multicast data from chan09 to chan10\n" );				// WIP REMOVE
 ////////////////////////////////////////////////////////////////
 
     printf("udp2nic initialized\n");
+    fflush(stdout);
 
     while ( !terminate ) {                                              // Keep going until we are told to stop
 
@@ -1414,11 +1453,11 @@ OneSecBuffArray[our_buff].Buff_time );
 
 //            actually_sent = sendmmsg(sockfd, &UDP_msg[udp_sent], try_to_send, MSG_DONTWAIT);
 
-//if ( terminate ) {
-//  perror("sendmmsg()");
-//  printf( "Tx-%d,%d,%d,%d\n", udp_sent, udp_2_send, try_to_send, actually_sent );
-//  pthread_exit(NULL);
-//}
+if ( terminate ) {
+  perror("sendmmsg()");
+  printf( "Tx-%d,%d,%d,%d\n", udp_sent, udp_2_send, try_to_send, actually_sent );
+  pthread_exit(NULL);
+}
 
             if ( actually_sent > 0 ) {
               udp_2_send -= actually_sent;
@@ -1446,16 +1485,38 @@ OneSecBuffArray[our_buff].Buff_time );
 
 //---------------------------------------------------------------------------------------------------------------------------------------------------
 
-void sig_handler(int signo)
+void sigint_handler(int signo)
 {
-  printf("\n\nAsked to shut down\n");
-  terminate = TRUE;
+  printf("\n\nAsked to shut down via SIGINT\n");
+  fflush(stdout);
+  terminate = TRUE;                             // This is a volatile, file scope variable.  All threads should be watching for this.
 }
+
+//---------------------------------------------------------------------------------------------------------------------------------------------------
+
+void sigterm_handler(int signo)
+{
+  printf("\n\nAsked to shut down via SIGTERM\n");
+  fflush(stdout);
+  terminate = TRUE;                             // This is a volatile, file scope variable.  All threads should be watching for this.
+}
+
+//---------------------------------------------------------------------------------------------------------------------------------------------------
+
+void sigusr1_handler(int signo)
+{
+  printf("\n\nSomeone sent a sigusr1 signal to me.  Will attempt EDT ring buffer reset\n");
+  fflush(stdout);
+  kick_edt = TRUE;				// Request that we should reset all the EDT card ring buffers
+}
+
+//---------------------------------------------------------------------------------------------------------------------------------------------------
 
 void usage(char *err)                           // Bad command line.  Report the supported usage.
 {
     printf("%s",err);
-    printf("\n\n To run:        /home/mwa/3pip -c 0 -p /home/mwa/disk3 -o 1114983992\n\n");
+    printf("This is edt2udp on xxx.  ver 3.00a Build xxx" );
+    printf("\n\n To run:        /home/mwa/edt2udp -c 0 -p /home/mwa/disk3 -o 1114983992\n\n");
     printf(    "                        -c EDT Channel.  Must be 0, or 1 or 2.\n");
     printf(    "                        -p path to directory where the observations live.\n");
     printf(    "                        -o initial observation id.\n");
@@ -1464,6 +1525,7 @@ void usage(char *err)                           // Bad command line.  Report the
     printf(    "                        -m maximum number of capture files to save.\n");
     printf(    "                        -b number of EDT card buffers (default=12).\n");
     printf(    "                        -d size EDT card DMA buffers in MB (default=12).\n");
+    fflush(stdout);
 }
 
 // ------------------------ Start of world -------------------------
@@ -1474,7 +1536,11 @@ int main(int argc, char **argv)
     int loop,loop1,loop2;                       // General purpose.  Usage changes in context
     terminate = FALSE;
 
-    signal(SIGINT, sig_handler);                // Tell the OS that we want to trap SIGINT calls
+//---------------- Trap signals from outside the program ------------------------
+
+    signal(SIGINT, sigint_handler);                     // Tell the OS that we want to trap SIGINT calls
+    signal(SIGTERM, sigterm_handler);                   // Tell the OS that we want to trap SIGTERM calls
+    signal(SIGUSR1, sigusr1_handler);                   // Tell the OS that we want to trap SIGUSR1 calls
 
 //---------------- Check for leap seconds in GPS time offset ------------------------
 
@@ -1482,6 +1548,7 @@ int main(int argc, char **argv)
     clock_gettime( CLOCK_REALTIME, &check_leap_secs);           // Ask the OS what the wall clock time is
     if ( ((INT64)check_leap_secs.tv_sec) >= 1483228799 ) GPS_offset = 315964782;        // If it's after leap second occurred then GPS offset is different.  NB check_leap_secs is in Linux epoch NOT GPS epoch time
     printf( "Leap second offset is currently %d\n", GPS_offset );
+    fflush(stdout);
 
 //---------------- Parse command line parameters ------------------------
 
@@ -1569,11 +1636,13 @@ int main(int argc, char **argv)
     if ( gethostname( hostname, sizeof hostname ) == -1 ) strcpy( hostname, "unknown" );        // if we can't read a hostname, set a default
 
     printf("Startup edt2udp on %s.  ver 3.00a Build %d\n", hostname, prog_build);
+    fflush(stdout);
 
     read_config( hostname, edt_unit, edt_channel, &conf );                                      // Populate the configuration info based on hostname, edt_unit and edt_channel
 
     if ( conf.edt2udp_id == 0 ) {                                                               // If the lookup returned an id of 0, we don't have enough information to continue
       printf("Hostname not found in configuration\n");
+      fflush(stdout);
       return(0);                                                                                // Abort!
     }
 
@@ -1649,6 +1718,7 @@ int main(int argc, char **argv)
 
     if (pthread_mutex_init(&FlipBuffArray[0].Buff_mx, NULL) != 0) {                     // Initialise the Mutex that will mediate access
       printf("\n Flip[0] mutex init failed\n");
+      fflush(stdout);
       return 1;
     }
 
@@ -1657,6 +1727,7 @@ int main(int argc, char **argv)
 
     if (pthread_mutex_init(&FlipBuffArray[1].Buff_mx, NULL) != 0) {
       printf("\n Flip[1] mutex init failed\n");
+      fflush(stdout);
       return 1;
     }
 
@@ -1678,6 +1749,7 @@ int main(int argc, char **argv)
       if ( posix_memalign((void **)&udpbuff[loop], 4096, ( sizeof(struct mwa_udp_packet) * UDP_PER_MC ) ) != 0 ) {      // malloc up enough for 80000 udp packets for this second
         udpbuff[loop] = NULL;
         printf( "\nudp buffer init failed on loop=%d\n", loop );                        // Fatal, so die early
+        fflush(stdout);
         return(0);
       }
 
@@ -1785,16 +1857,23 @@ int main(int argc, char **argv)
 
     pthread_join(edt2flip_pt,NULL);
     printf("Joined edt2flip\n");
+    fflush(stdout);
+
     pthread_join(flip2buff_pt,NULL);
     printf("Joined flip2buff\n");
+    fflush(stdout);
 
     pthread_join(buff2udp_pt,NULL);
     printf("Joined buff2udp\n");
+    fflush(stdout);
+
     pthread_join(buff2udp2_pt,NULL);
     printf("Joined buff2udp2\n");
+    fflush(stdout);
 
     pthread_join(udp2nic_pt,NULL);
     printf("Joined udp2nicp\n");
+    fflush(stdout);
 
     pthread_mutex_destroy( &buff_array_mx );                            // We've finished so free up the resources
     pthread_mutex_destroy( &FlipBuffArray[0].Buff_mx );
@@ -1803,6 +1882,7 @@ int main(int argc, char **argv)
 /*  WIP!!! free up the malloced buffers */
 
     printf("Done\n");
+    fflush(stdout);
 
     return(0);
 }
