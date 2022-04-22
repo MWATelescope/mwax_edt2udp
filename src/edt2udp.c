@@ -5,6 +5,8 @@
 // Author(s)  BWC Brian Crosse brian.crosse@curtin.edu.au
 // Commenced 2018-07-04
 //
+// 3.00a-030    2021-10-13 BWC  Send health data packets to 224.0.2.2:8003
+//
 // 3.00a-029    2021-10-11 BWC  Add logging on transmission of a good second from the flip2buff thread
 //
 // 3.00a-028    2021-10-07 BWC  Change log output for easier receiver startup status checking.  More 'fflush(stdout);'
@@ -107,7 +109,7 @@
 
 #define _GNU_SOURCE
 
-#define BUILD 29
+#define BUILD 30
 #define WORKINGCHAN 8
 
 #include "edtinc.h"
@@ -151,7 +153,7 @@
 
 //---------------- MWA external Structure definitions --------------------
 
-#pragma pack(push,1)                          // We're writing this header into all our packets, so we want/need to force the compiler not to add it's own idea of structure padding
+#pragma pack(push,1)                          // We're sharing this structure with other programs, so we want/need to force the compiler not to add it's own idea of structure padding
 
 typedef struct mwa_udp_packet {               // Structure format for the MWA data packets
 
@@ -168,6 +170,37 @@ typedef struct mwa_udp_packet {               // Structure format for the MWA da
 
 } mwa_udp_packet_t ;
 
+//----------------
+
+typedef struct medconv_health {			// Structure format for the health packets to send to M&C
+
+    uint8_t message_type;			// Health packet format.  Currently only 0x01 for 'announcement of good 1 second data arrival'
+    uint8_t medconv_state;			// Current state of medconv process.  0x01 for 'awaiting new RRI receiver data'
+
+    uint32_t GPS_time;				// The GPS second assigned to the current 1 second data block.
+    int32_t arrival_offset;			// The *estimated* time offset in nanoseconds between assigned GPS second roll-over and arrival of first packet.
+                                                // NB: Signed value with possible -ve values!
+    uint32_t last_GPS_time;			// The GPS second assigned to the last good 1 second data block seen (before the current one)
+
+    uint8_t seen_unusable;			// How many 'unusable' blocks seen since the last health packet (clips at 255.  Treat as 'zero' or 'non-zero' flag)
+    uint8_t seen_junk;				// How many 'junk' blocks seen since the last health packet (clips at 255.  Treat as 'zero' or 'non-zero' flag)
+    uint8_t seen_badsync;			// How many times did the decoding thread indicate bad or no sync since the last health packet (clips at 255.  Treat as 'zero' or 'non-zero' flag)
+    uint8_t seen_lostsync;			// How many times did we lose edt block sync since the last health packet (clips at 255.  Treat as 'zero' or 'non-zero' flag)
+    uint8_t seen_other;				// How many other warnings occurred since the last health packet (clips at 255.  Treat as 'zero' or 'non-zero' flag)
+
+    uint8_t receiver;				// Decoded RRI receiver number from the current 1 sec of data.  Will be 1 to 16 inclusive (assuming message type supports this)
+    uint8_t fibre3;				// Decoded RRI fibre number on that receiver.  Will be 0, 1 or 2 (assuming message type supports this)
+    uint8_t lane;				// Decoded system wide fibre lane.  Will be 0 to 47 inclusive (assuming message type supports this)
+    uint8_t edt_unit;				// EDT card unit number (0 or 1) for the two cards that are (or might be?) in a medconv server
+    uint8_t edt_channel;			// EDT channel number (0, 1 or 2) for the 1st, 2nd or 3rd SFP socket (port) on the EDT card
+
+    uint8_t instance;				// Unique medconv process instance for the system.  Will be 1 to 60 inclusive.
+    char hostname[10];				// medconv hostname as a null terminated string.  eg: medconv03{null}.  Always in the form of 9 ASCII printable chars plus a null (0x00)
+    int32_t pid;				// Process ID of this process on this server.
+    uint16_t build;				// Software version number of the code generating this packet.
+
+} medconv_health_t ;
+
 #pragma pack(pop)                               // Set the structure packing back to 'normal' whatever that is
 
 //----------------
@@ -179,6 +212,7 @@ typedef struct medconv_config {               // Structure for configuration of 
     int edt_unit;
     int edt_channel;
     char local_if[20];
+    char local_mc_if[20];
 
 } medconv_config_t ;
 
@@ -305,6 +339,7 @@ int edtbufs = 12;                                       // Set a default number 
 int edtbufsize = 12;                                    // Set a default size in MegaBytes for the EDT card buffers.  NB: If this number is greater than 23, then the maths for arrival times needs tweaking.
 
 medconv_config_t conf;                                  // A place to store the configuration data for this instance of the program.  ie of the 60 copies running on 10 computers or whatever
+medconv_health_t health;				// Health data shared among threads.  Transmitted by flip2buff to multicast
 
 cpu_set_t physical_id_0, physical_id_1;                 // Make a CPU affinity set for socket 0 and one for socket 1 (NUMA node0 and node1)
 
@@ -365,75 +400,75 @@ void read_config ( char *us, int edtu, int edtc, medconv_config_t *config )
 
     medconv_config_t mc_config[MAXINSTANCE] = {
        { 0,"unknown",0,0,""}
-      ,{ 1,"medconv01",0,0,"192.168.90.121"}
-      ,{ 2,"medconv01",0,1,"192.168.90.121"}
-      ,{ 3,"medconv01",0,2,"192.168.90.121"}
-      ,{ 4,"medconv01",1,0,"192.168.90.122"}
-      ,{ 5,"medconv01",1,1,"192.168.90.122"}
-      ,{ 6,"medconv01",1,2,"192.168.90.122"}
+      ,{ 1,"medconv01",0,0,"192.168.90.121","10.128.6.1"}
+      ,{ 2,"medconv01",0,1,"192.168.90.121","10.128.6.1"}
+      ,{ 3,"medconv01",0,2,"192.168.90.121","10.128.6.1"}
+      ,{ 4,"medconv01",1,0,"192.168.90.122","10.128.6.1"}
+      ,{ 5,"medconv01",1,1,"192.168.90.122","10.128.6.1"}
+      ,{ 6,"medconv01",1,2,"192.168.90.122","10.128.6.1"}
 
-      ,{ 7,"medconv02",0,0,"192.168.90.3"}
-      ,{ 8,"medconv02",0,1,"192.168.90.3"}
-      ,{ 9,"medconv02",0,2,"192.168.90.3"}
-      ,{10,"medconv02",1,0,"192.168.90.4"}
-      ,{11,"medconv02",1,1,"192.168.90.4"}
-      ,{12,"medconv02",1,2,"192.168.90.4"}
+      ,{ 7,"medconv02",0,0,"192.168.90.3","10.128.6.2"}
+      ,{ 8,"medconv02",0,1,"192.168.90.3","10.128.6.2"}
+      ,{ 9,"medconv02",0,2,"192.168.90.3","10.128.6.2"}
+      ,{10,"medconv02",1,0,"192.168.90.4","10.128.6.2"}
+      ,{11,"medconv02",1,1,"192.168.90.4","10.128.6.2"}
+      ,{12,"medconv02",1,2,"192.168.90.4","10.128.6.2"}
 
-      ,{13,"medconv03",0,0,"192.168.90.5"}
-      ,{14,"medconv03",0,1,"192.168.90.5"}
-      ,{15,"medconv03",0,2,"192.168.90.5"}
-      ,{16,"medconv03",1,0,"192.168.90.6"}
-      ,{17,"medconv03",1,1,"192.168.90.6"}
-      ,{18,"medconv03",1,2,"192.168.90.6"}
+      ,{13,"medconv03",0,0,"192.168.90.5","10.128.6.3"}
+      ,{14,"medconv03",0,1,"192.168.90.5","10.128.6.3"}
+      ,{15,"medconv03",0,2,"192.168.90.5","10.128.6.3"}
+      ,{16,"medconv03",1,0,"192.168.90.6","10.128.6.3"}
+      ,{17,"medconv03",1,1,"192.168.90.6","10.128.6.3"}
+      ,{18,"medconv03",1,2,"192.168.90.6","10.128.6.3"}
 
-      ,{19,"medconv04",0,0,"192.168.90.7"}
-      ,{20,"medconv04",0,1,"192.168.90.7"}
-      ,{21,"medconv04",0,2,"192.168.90.7"}
-      ,{22,"medconv04",1,0,"192.168.90.8"}
-      ,{23,"medconv04",1,1,"192.168.90.8"}
-      ,{24,"medconv04",1,2,"192.168.90.8"}
+      ,{19,"medconv04",0,0,"192.168.90.7","10.128.6.4"}
+      ,{20,"medconv04",0,1,"192.168.90.7","10.128.6.4"}
+      ,{21,"medconv04",0,2,"192.168.90.7","10.128.6.4"}
+      ,{22,"medconv04",1,0,"192.168.90.8","10.128.6.4"}
+      ,{23,"medconv04",1,1,"192.168.90.8","10.128.6.4"}
+      ,{24,"medconv04",1,2,"192.168.90.8","10.128.6.4"}
 
-      ,{25,"medconv05",0,0,"192.168.90.9"}
-      ,{26,"medconv05",0,1,"192.168.90.9"}
-      ,{27,"medconv05",0,2,"192.168.90.9"}
-      ,{28,"medconv05",1,0,"192.168.90.10"}
-      ,{29,"medconv05",1,1,"192.168.90.10"}
-      ,{30,"medconv05",1,2,"192.168.90.10"}
+      ,{25,"medconv05",0,0,"192.168.90.9","10.128.6.5"}
+      ,{26,"medconv05",0,1,"192.168.90.9","10.128.6.5"}
+      ,{27,"medconv05",0,2,"192.168.90.9","10.128.6.5"}
+      ,{28,"medconv05",1,0,"192.168.90.10","10.128.6.5"}
+      ,{29,"medconv05",1,1,"192.168.90.10","10.128.6.5"}
+      ,{30,"medconv05",1,2,"192.168.90.10","10.128.6.5"}
 
-      ,{31,"medconv06",0,0,"192.168.90.11"}
-      ,{32,"medconv06",0,1,"192.168.90.11"}
-      ,{33,"medconv06",0,2,"192.168.90.11"}
-      ,{34,"medconv06",1,0,"192.168.90.12"}
-      ,{35,"medconv06",1,1,"192.168.90.12"}
-      ,{36,"medconv06",1,2,"192.168.90.12"}
+      ,{31,"medconv06",0,0,"192.168.90.11","10.128.6.6"}
+      ,{32,"medconv06",0,1,"192.168.90.11","10.128.6.6"}
+      ,{33,"medconv06",0,2,"192.168.90.11","10.128.6.6"}
+      ,{34,"medconv06",1,0,"192.168.90.12","10.128.6.6"}
+      ,{35,"medconv06",1,1,"192.168.90.12","10.128.6.6"}
+      ,{36,"medconv06",1,2,"192.168.90.12","10.128.6.6"}
 
-      ,{37,"medconv07",0,0,"192.168.90.13"}
-      ,{38,"medconv07",0,1,"192.168.90.13"}
-      ,{39,"medconv07",0,2,"192.168.90.13"}
-      ,{40,"medconv07",1,0,"192.168.90.14"}
-      ,{41,"medconv07",1,1,"192.168.90.14"}
-      ,{42,"medconv07",1,2,"192.168.90.14"}
+      ,{37,"medconv07",0,0,"192.168.90.13","10.128.6.7"}
+      ,{38,"medconv07",0,1,"192.168.90.13","10.128.6.7"}
+      ,{39,"medconv07",0,2,"192.168.90.13","10.128.6.7"}
+      ,{40,"medconv07",1,0,"192.168.90.14","10.128.6.7"}
+      ,{41,"medconv07",1,1,"192.168.90.14","10.128.6.7"}
+      ,{42,"medconv07",1,2,"192.168.90.14","10.128.6.7"}
 
-      ,{43,"medconv08",0,0,"192.168.90.15"}
-      ,{44,"medconv08",0,1,"192.168.90.15"}
-      ,{45,"medconv08",0,2,"192.168.90.15"}
-      ,{46,"medconv08",1,0,"192.168.90.16"}
-      ,{47,"medconv08",1,1,"192.168.90.16"}
-      ,{48,"medconv08",1,2,"192.168.90.16"}
+      ,{43,"medconv08",0,0,"192.168.90.15","10.128.6.8"}
+      ,{44,"medconv08",0,1,"192.168.90.15","10.128.6.8"}
+      ,{45,"medconv08",0,2,"192.168.90.15","10.128.6.8"}
+      ,{46,"medconv08",1,0,"192.168.90.16","10.128.6.8"}
+      ,{47,"medconv08",1,1,"192.168.90.16","10.128.6.8"}
+      ,{48,"medconv08",1,2,"192.168.90.16","10.128.6.8"}
 
-      ,{49,"medconv09",0,0,"192.168.90.17"}
-      ,{50,"medconv09",0,1,"192.168.90.17"}
-      ,{51,"medconv09",0,2,"192.168.90.17"}
-      ,{52,"medconv09",1,0,"192.168.90.18"}
-      ,{53,"medconv09",1,1,"192.168.90.18"}
-      ,{54,"medconv09",1,2,"192.168.90.18"}
+      ,{49,"medconv09",0,0,"192.168.90.17","10.128.6.9"}
+      ,{50,"medconv09",0,1,"192.168.90.17","10.128.6.9"}
+      ,{51,"medconv09",0,2,"192.168.90.17","10.128.6.9"}
+      ,{52,"medconv09",1,0,"192.168.90.18","10.128.6.9"}
+      ,{53,"medconv09",1,1,"192.168.90.18","10.128.6.9"}
+      ,{54,"medconv09",1,2,"192.168.90.18","10.128.6.9"}
 
-      ,{55,"medconv10",0,0,"192.168.90.19"}
-      ,{56,"medconv10",0,1,"192.168.90.19"}
-      ,{57,"medconv10",0,2,"192.168.90.19"}
-      ,{58,"medconv10",1,0,"192.168.90.20"}
-      ,{59,"medconv10",1,1,"192.168.90.20"}
-      ,{60,"medconv10",1,2,"192.168.90.20"}
+      ,{55,"medconv10",0,0,"192.168.90.19","10.128.6.10"}
+      ,{56,"medconv10",0,1,"192.168.90.19","10.128.6.10"}
+      ,{57,"medconv10",0,2,"192.168.90.19","10.128.6.10"}
+      ,{58,"medconv10",1,0,"192.168.90.20","10.128.6.10"}
+      ,{59,"medconv10",1,1,"192.168.90.20","10.128.6.10"}
+      ,{60,"medconv10",1,2,"192.168.90.20","10.128.6.10"}
     };
 
     for ( int loop = 0 ; loop < MAXINSTANCE ; loop++ ) {        // Check through all possible configurations
@@ -803,6 +838,75 @@ void *flip2buff()
     uint64_t bot32mask = 0xFFFFFFFF;                                    // Mask to only keep the bottom 32 bits of the GPS time
     int s_obs_id_ndx;                                                   // will be the index number into the metabin array for the correct obs_id for this second
 
+//-------------------- Set up the multicast transmit for the health packets to 224.0.2.2:8003
+
+    char *multicast_ip = "224.0.2.2";
+    unsigned char ttl = 3;
+    struct sockaddr_in addr;
+    struct in_addr localInterface;
+
+    int health_socket;
+
+    // create what looks like an ordinary UDP socket
+    if ( ( health_socket = socket( AF_INET, SOCK_DGRAM, 0) ) < 0) {
+      perror("socket");
+      terminate = TRUE;
+      pthread_exit(NULL);
+    }
+
+    // set up destination address
+    memset( &addr, 0, sizeof(addr) );
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = inet_addr( multicast_ip );
+    addr.sin_port = htons( 8003 );					// Health port for medconv health packets
+
+    setsockopt( health_socket, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl) );
+
+    char loopch = 0;
+
+    if (setsockopt( health_socket, IPPROTO_IP, IP_MULTICAST_LOOP, (char *) &loopch, sizeof(loopch) ) < 0) {
+      perror("setting IP_MULTICAST_LOOP:");
+      close( health_socket );
+      terminate = TRUE;
+      pthread_exit(NULL);
+    }
+
+    // Set local interface for outbound multicast datagrams. The IP address specified must be associated with a local, multicast-capable interface.
+
+    localInterface.s_addr = inet_addr( conf.local_mc_if );
+
+    if (setsockopt( health_socket, IPPROTO_IP, IP_MULTICAST_IF, (char *) &localInterface, sizeof(localInterface) ) < 0) {
+      perror("setting local interface");
+      close( health_socket );
+      terminate = TRUE;
+      pthread_exit(NULL);
+    }
+
+//-------------------- Fill up the initial values and values that won't change in the health packets
+
+    health.message_type = 0x01;						// Health packet format.  Currently only 0x01 for 'announcement of good 1 second data arrival'
+    health.medconv_state = 0x01;					// Current state of medconv process.  0x01 for 'awaiting new RRI receiver data' (Well it will be by the time I send this)
+
+    health.last_GPS_time = 0;						// The GPS second assigned to the last good 1 second data block seen (before the current one). So far there hasn't been any.
+
+    health.seen_unusable = 0;						// How many 'unusable' blocks seen since the last health packet (clips at 255.  Treat as 'zero' or 'non-zero' flag)
+    health.seen_junk = 0;						// How many 'junk' blocks seen since the last health packet (clips at 255.  Treat as 'zero' or 'non-zero' flag)
+    health.seen_badsync = 0;						// How many times did the decoding thread indicate bad or no sync since the last health packet (clips at 255.  Treat as 'zero' or 'non-zero' flag)
+    health.seen_lostsync = 0;						// How many times did we lose edt block sync since the last health packet (clips at 255.  Treat as 'zero' or 'non-zero' flag)
+    health.seen_other = 0;						// How many other warnings occurred since the last health packet (clips at 255.  Treat as 'zero' or 'non-zero' flag)
+
+    health.edt_unit = conf.edt_unit;					// EDT card unit number (0 or 1) for the two cards that are (or might be?) in a medconv server
+    health.edt_channel = conf.edt_channel;				// EDT channel number (0, 1 or 2) for the 1st, 2nd or 3rd SFP socket (port) on the EDT card
+    health.instance = conf.edt2udp_id;					// Unique medconv process instance for the system.  Will be 1 to 60 inclusive.
+
+    strncpy ( health.hostname, conf.host, 10 );				// Copy the first 10 characters (incl null) of the hostname into the health packet
+    health.hostname[9] = 0x00;						// In case something goes wrong (bug?) with the conf.host length, then force a null terminator on the health packet copy.
+
+    health.pid = getpid();						// Process ID of this process on this server.
+    health.build = BUILD;						// Software version number of the code generating this packet.
+
+//-------------------- Get on with looking for 1 second data blocks
+
     usleep(500000);                                                     // Give edt2flip enough time to lock the mutex on flip buffer 0.  First packet can't be for at least 1 second anyway.
 
     printf("\nflip2buff started\n");
@@ -820,7 +924,7 @@ void *flip2buff()
 
       buff_ndx = FlipBuffArray[flip].OneSecBuff_ndx;                    // We'll be using this quite a lot.  If only for readability, let's make it a variable.
 
-      my = &OneSecBuffArray[buff_ndx];                                  // We'll be using this quite a lot.  If only for readability, let's make it a variable.
+      my = &OneSecBuffArray[buff_ndx];					// We'll be using this quite a lot.  If only for readability, let's make it a variable.
 
       if ( my->Buff_ptr != FlipBuffArray[flip].Buff_ptr ) {             // ASSERT if these don't match.  We must have a bug.  It should have been there since the original Malloc.
         printf("\nASSERT: Flip buffer pointer doesn't match main array pointer\n");
@@ -989,7 +1093,32 @@ void *flip2buff()
 
       fflush(stdout);
 
+      // Now populate the packet structure directly in memory
+
+      health.GPS_time = health_Buff_time;
+      health.arrival_offset = health_GPS_start_nsec - health_est_lag_time;
+      health.last_GPS_time = health_last_Buff_time;
+      health.receiver = health_rec;
+      health.fibre3 = health_fibre3;
+      health.lane = health_fibre_lane;
+
+      // Now send the multicast udp health packet
+
+      if ( sendto( health_socket, &health, sizeof(health), 0, (struct sockaddr *) &addr, sizeof(addr) ) < 0) {
+        printf( "\nFailed to send health packet" );
+        fflush(stdout);
+      }
+
+      // Now reset the error counts.  NB: There is a small windo where we may lose an increment, but they are only a guide and not critical to know, so ignore that possibility
+      health.seen_unusable = 0;						// How many 'unusable' blocks seen since the last health packet (clips at 255.  Treat as 'zero' or 'non-zero' flag)
+      health.seen_junk = 0;						// How many 'junk' blocks seen since the last health packet (clips at 255.  Treat as 'zero' or 'non-zero' flag)
+      health.seen_badsync = 0;						// How many times did the decoding thread indicate bad or no sync since the last health packet (clips at 255.  Treat as 'zero' or 'non-zero' flag)
+      health.seen_lostsync = 0;						// How many times did we lose edt block sync since the last health packet (clips at 255.  Treat as 'zero' or 'non-zero' flag)
+      health.seen_other = 0;						// How many other warnings occurred since the last health packet (clips at 255.  Treat as 'zero' or 'non-zero' flag)
+
       health_last_Buff_time = health_Buff_time;				// Now *this* second is the *last* good second
+
+      // End of health packet sending
 
 /*
 struct timespec debug_time;
