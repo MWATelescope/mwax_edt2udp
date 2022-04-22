@@ -5,6 +5,8 @@
 // Author(s)  BWC Brian Crosse brian.crosse@curtin.edu.au
 // Commenced 2018-07-04
 //
+// 3.00b-035    2022-01-19 BWC  Change to long baseline configuration
+//
 // 3.00a-034    2021-11-10 BWC  Make 'kick' edt also open and close the port.
 //				Add support for health packets to show 'unusable','junk','badsync' & 'lostsync' counts
 //				Automatically kick the edt card if the arrival time for the second's data is late two times in a row.
@@ -60,6 +62,106 @@
 //                              Change udp packet specification to send tile_id
 //
 // 3.00a-010    2018-07-04 BWC  Fork code from existing 3Pip software.
+//===================================================================================================================================================
+// Capture UDP packets into a temporary, user space buffer and then sort/copy/process them into some output array
+//
+// Author(s)  BWC Brian Crosse brian.crosse@curtin.edu.au
+// Commenced 2017-05-25
+//
+// 2.03e-071    2021-12-02 GJS  Update to swap mwax05 back into getting channel 5.
+//
+// 2.03d-070    2021-11-09 GJS  Update to add breakthrough listen compute node to the channel mapping struct
+//
+// 2.03c-069    2021-10-26 BWC  Change mwax05 to CC25 (ie stop it from seeing data)
+//                              Yet to do: "Also grab RAWSCALE from metafits and stick it in as is into the PSRDADA header.  It’s a decimal value (float?)"
+//
+// 2.03b-068    2021-10-25 BWC  Handle disappearance (and later restart) of edp packets better
+//                              Change RECVMMSG_MODE back to MSG_WAITFORONE so VMA can work more efficiently
+//                              Add logging of the number of free file available when about to write out a sub file
+//                              Add version and build to PSRDADA header
+//
+// 2.03a-067    2021-10-20 BWC  Modified default channels to be 1-26 (with a copy of CC10 on mwax25 because mwax10 is in Perth)
+//
+// 2.02z-066    2021-10-07 GJS  Modified default channels to be 1-12
+//
+// 2.02y-065    2021-10-06 GJS  Modified default channels for mwax25 and 26
+//
+// 2.02y-064    2021-10-05 BWC  Trap SIGTERM in addition to SIGINT for shutdown requests
+//
+// 2.02x-063    2021-10-05 BWC  Change default channels for mwax25 and mwax26
+//
+// 2.02w-062    2021-10-05 BWC  Fix minor bug with affinity being set differently on mwax15
+//
+// 2.02v-061    2021-09-22 BWC  Add all genuine mwax servers (mwax01 to mwax26) into config
+//
+// 2.02u-060    2021-08-19 BWC  Add genuine mwax01 into config and move older servers to 192.168.90.19x addresses for the voltage network
+//
+// 2.02t-059    2021-03-19 BWC  Check /dev/shm/mwax directory exists to prevent crash
+//                              Check /vulcan/metafits directory exists to prevent crash
+//                              Add -c coarse channel override command on command line
+//                              Included some delay tracking stuff (See below)
+//                              Added source offset to packet address during copy
+//                              Revert hardcoded sections to Short Baseline.
+//                              Update names of mwax servers to mwax106 etc.
+//                              Increase the size of the ip string to prevent a compiler warning
+//
+// 2.02s-058    2021-02-15 BWC  Update layout config for mwax01-mwax07
+//
+// 2.02r-057    2021-01-11 BWC  Update layout config to Long Baseline *with* RFIpole
+//                              Alter the config options to be better suited to CC10 being 256T data volume
+//
+// 2.02q-056    2021-01-04 BWC  If the FILENAME in the metafits contains 'mwax_vcs' or 'mwax_corr' put in the relevant modes
+//                              Update the server config
+//
+// 2.02p-055    2020-11-25 BWC  Force the MODE to NO_CAPTURE unless the FILENAME in the metafits contains 'HTR'
+//
+// 2.02n-054    2020-11-19 BWC  Don't set CPU affinity except for on mwax07 and mwax0a
+//
+// 2.02m-053    2020-11-12 BWC  To aid in debugging, convert NO_CAPTURES to HW_LFILES
+//
+// 2.02k-052    2020-11-05 BWC  Make "MSG_DONTWAIT" vs "MSG_WAITFORONE" a #define option
+//                              Increase the size of the UDP buffers to 8x1024x1024
+//                              Print more debug info at closedown
+//
+// 2.02j-051    2020-11-03 BWC  Add config lines for mwax07 and mwax0a to make it easy to switch coarse channels
+//                              Add fflush(stdout) after all relevant printf lines for debug file output
+//
+// 2.02i-050    2020-10-29 BWC  Make changes to the recvmmsg code to hopefully improve performance.
+//
+// 2.02h-049    2020-10-23 BWC  Add command line debug option to set debug_mode on. (ie write to .free files instead of .sub files)
+//
+// 2.02g-048    2020-10-21 BWC  Add selectable cpu affinity per thread
+//
+// 2.02f-047    2020-10-13 BWC  Add the HP test machine to the configuration
+//
+// 2.02e-046    2020-09-17 BWC  Rename to mwax_udp2sub for consistency.  Comment out some unused variables to stop compile warnings
+//                              Change the cfitsio call for reading strings from ffgsky to ffgkls in hope it fixes the compile on BL server. (Spoiler: It does)
+//
+// 2.02d-045    2020-09-09 BWC  Switch back to long baseline configuration
+//                              Make UDP_num_slots a config variable so different servers can have different values
+//                              Do the coarse channel reversal above (chan>=129)
+//                              Change MODE to NO_CAPTURE after the observation ends
+//
+// 2.02c-044    2020-09-08 BWC  Read Metafits directly from vulcan. No more metabin files
+//
+// 2.02b-043    2020-09-03 BWC  Write ASCII header onto subfiles.  Need to fake some details for now
+//
+// 2.02a-042    2020-09-03 BWC  Force switch to short baseline tile ids to match medconv
+//                              Add heaps of debugs
+//
+// 2.01a-041    2020-09-02 BWC  Read metabin from directory specified in config
+//
+// 2.00a-040    2020-08-25 BWC  Change logic to write to .sub file so that udp packet payloads are not copied until after the data arrives for that sub
+//                              Clear out a lot of historical code that isn't relevant for actual sub file generation (shifted to other utilities)
+//
+// 1.00a-039    2020-02-07 BWC  Tell OS not to buffer disk writes.  This should improve memory usage.
+//
+// 1.00a-038    2020-02-04 BWC  Add feature to support multiple coarse channels arriving from the one input (multicast *or* file) on recsim only
+//                              Change recsim to make .sub files with only 1 rf_input.
+//
+// 1.00a-037    2020-02-03 BWC  Ensure .sub is padded to full size even if tiles are missing.  Improve reading udp packets from file
+//
+// 1.00a-036    2019-12-10 BWC  Add recsim as a Perth server
 //                              Unnecessary functions for new MWA correlator removed
 //
 // 3.00a-009    2018-02-01 BWC  Added support for multiple EDT cards via -u command line option
@@ -119,7 +221,7 @@
 
 #define _GNU_SOURCE
 
-#define BUILD 34
+#define BUILD 35
 #define WORKINGCHAN 8
 
 #include "edtinc.h"
@@ -2119,7 +2221,7 @@ int main(int argc, char **argv)
         309,308,307,306,305,304,303,302,317,316,315,314,313,312,311,310,
         329,328,327,326,325,324,323,322,337,336,335,334,333,332,331,330
     };
-
+*/
 
     UINT16 rri2rf_input[256] = {                                                                // RRI to rf_input LONG BASELINE *without* RFIpole
         4009,4008,4007,4006,4005,4004,4003,4002,4017,4016,4015,4014,4013,4012,4011,4010,
@@ -2139,7 +2241,8 @@ int main(int argc, char **argv)
         309,308,307,306,305,304,303,302,317,316,315,314,313,312,311,310,
         329,328,327,326,325,324,323,322,337,336,335,334,333,332,331,330
     };
-*/
+
+/*
     UINT16 rri2rf_input[256] = {                                                                // RRI to rf_input SHORT BASELINE
 	29,28,27,26,25,24,23,22,37,36,35,34,33,32,31,30,
 	69,68,67,66,65,64,63,62,77,76,75,74,73,72,71,70,
@@ -2158,6 +2261,7 @@ int main(int argc, char **argv)
 	2025,2024,2023,2022,2021,2020,2019,2018,2033,2032,2031,2030,2029,2028,2027,2026,
 	2073,2072,2071,2070,2069,2068,2067,2066,2081,2080,2079,2078,2077,2076,2075,2074
     };
+*/
 
     for ( loop = 0; loop < MAX_OBS_IDS; loop++ ) {                                      // One loop for each observation we store the metadata for
 
