@@ -5,8 +5,10 @@
 // Author(s)  BWC Brian Crosse brian.crosse@curtin.edu.au
 // Commenced 2018-07-04
 //
+// 3.00a-029    2021-10-11 BWC  Add logging on transmission of a good second from the flip2buff thread
+//
 // 3.00a-028    2021-10-07 BWC  Change log output for easier receiver startup status checking.  More 'fflush(stdout);'
-//				Add support for a SIGUSR1 to force an EDT card ring buffer reset 
+//				Add support for a SIGUSR1 to force an EDT card ring buffer reset
 //
 // 3.00a-027    2021-09-14 BWC  Update all the IP addresses for medconv01 -> medconv10
 //
@@ -105,7 +107,7 @@
 
 #define _GNU_SOURCE
 
-#define BUILD 28
+#define BUILD 29
 #define WORKINGCHAN 8
 
 #include "edtinc.h"
@@ -188,6 +190,9 @@ typedef struct OneSecBuff {
     UINT32 GPS_32;                              // Bottom 32 bits of GPS time. Used in network packets where upper 32 bits can be assumed.
     INT64 obs_id;                               // Place to store the obs_id.  Assumed to be the GPS time of the start of the observation
 
+    struct timespec sec_start_time;		// Time that the first packet for this second is handed to the application (us) in linux format
+    int sec_start2end;				// The number of bytes after the start of the second and before we got a chance to record the time stamp above.
+
     INT16 fibre_lane;                           // 0-47, includes both receiver number and which of the three fibres we're connected to
     int rec;                                    // The receiver number that this one second block came from. 1 based so 1 to 16 inclusive.
     int fibre3;                                 // as above.  Was this block from fibre 0, 1 or 2 on this receiver. Fibre numbers are 0 based.
@@ -217,6 +222,10 @@ typedef struct FlipBuff {
 
     int OneSecBuff_ndx;                         // Index into OneSecBuff array that this flip buffer equates to.
     INT64 Buff_time;                            // GPS time of this buffer
+
+    struct timespec sec_start_time;		// Time that the first packet is handed to the application (us) in linux format
+    int sec_start2end;				// The number of bytes after the start of the second and before we got a chance to record the time stamp above.
+
     INT16 fibre_lane;                           // 0-47, includes both receiver number and which of the three fibres we're connected to
     UINT8 *Buff_ptr;                            // Pointer to the ~205MB buffer for this second.
     pthread_mutex_t Buff_mx;                    // The mutex object associated with this object.
@@ -267,8 +276,8 @@ int OneSecBuff_inuse = 0;                               // Number of buffers all
 int OneSecBuff_first = -1;                              // Index into metadata array for earliest chronological block
 int OneSecBuff_last = -1;                               // Index into metadata array for most recent chronological block
 
-FlipBuff_t FlipBuffArray[2];                            // WIP!!! Should we malloc these instead of allocating them at compile time?
-OneSecBuff_t OneSecBuffArray[220];                      // WIP!!! Should really be malloced.  This is very kludgy.
+FlipBuff_t FlipBuffArray[2];                            // Metadata about the two one second buffers we're currently using for the the write from the EDT card (1 live, 1 ready to go at short notice)
+OneSecBuff_t OneSecBuffArray[220];                      // This is the array of control metadata for the buffers, not the buffers themselves, so this isn't very much RAM
 pthread_mutex_t buff_array_mx;                          // Controls access to the metadata for the OneSecBuffArray
 metabin_t obs_meta[MAX_OBS_IDS];                        // Room for the metadata for the last few observations (NB not subobservations, but actual full observations)
 
@@ -281,7 +290,7 @@ static const int OneSecBuff_Size = 1280000 * 168;       // How big is each secon
 //static const int coarse_buff_size = 528000;           // Protocol specifies 528000 bytes (2000 packets) for each coarse chan before moving on to next. Equal to OneSecBuff_Size / NumChan / time_points_per_sec
 //static const int fiftyms_buff_size = 12672000;                // Protocol specifies 12672000 bytes (24 x 2000 packets) for each 50ms time step before moving on to next.  Equal to coarse_buff_size * NumChan
 
-int GPS_offset = 315964783;                             // The number of seconds that must be SUBTRACTED from the Linux Epoch to get MWA's GPS time.  Corrected for leap seconds in startup code
+int GPS_offset = 315964782;                             // The number of seconds that must be SUBTRACTED from the Linux Epoch to get MWA's GPS time.  Corrected for leap seconds in startup code
 
 int edt_unit=0;                                         // Default to first EDT card
 int edt_channel=2;                                      // EDT card input channel.  Default to the channel that vcs boxes have a direct fibe plugged in to (2)
@@ -460,9 +469,9 @@ void *edt2flip()
     INT64 Current_GPStime = 0;                                          // The GPS time of the one second block we're currently assembling
     INT32 Current_GPStime_nsec;                                         // nsecs after GPStime we estimate packet 0 hit the input to the EDT card.  Adjusted by its location in buffer
 
-    INT64 GPStime_of_fail = -1;                                         // -1 means never failed (since start of process)
-    int failures_this_sec = 0;                                          // We'll be watching this to decide if the EDT card has lost DMA buffer consistency like after an fPBF 1st fibre reset
-    int failures_allowed = 10;                                          // How many buffer failures in a second before we attempt an EDT card buffer reset?
+//    INT64 GPStime_of_fail = -1;                                         // -1 means never failed (since start of process)
+//    int failures_this_sec = 0;                                          // We'll be watching this to decide if the EDT card has lost DMA buffer consistency like after an fPBF 1st fibre reset
+//    int failures_allowed = 10;                                          // How many buffer failures in a second before we attempt an EDT card buffer reset?
 
     int bufsize = edtbufsize*1024*1024;                                 // Size for EDT cards DMA buffer.  Comes out of bottom 4GB.  Allocated by EDT drivers.
 
@@ -489,7 +498,10 @@ void *edt2flip()
 
     INT16 fibre_lane = -1;                                              // Which receiver fibre RocketIO lane.  From 0 to 47 inclusive.  Includes receiver number as well as fibre on receiver.  -1 == unknown
     BOOL synced = FALSE;                                                // Assume we're NOT synced up with respect to 1 second arriving packets for now
-    struct timespec arrive_time;
+    struct timespec arrive_time;					// Last buffer arrival time
+
+    struct timespec sec_start_time;					// Time that the first buffer for this second is handed to the application
+    int sec_start2end;							// The number of bytes after the start of the second and before we got a chance to record the time stamp above.
 
     int loop, next_packet_ndx = 0;                                      // Initialise to keep -Wall warnings happy.
     int this_packet_no, next_packet_no = 0;
@@ -552,14 +564,17 @@ void *edt2flip()
       }
 
       dma_buf_8 = edt_wait_for_buffers(edt_p, 1);                                       // Get the data from the card OR if it was a timeout get a buffer of useless junk.
+      clock_gettime( CLOCK_REALTIME, &arrive_time);					// Grab the time now for accuracy.  We may want it later.
+
       edt_start_buffers(edt_p, 1);                                                      // Tell the card we can handle one more buffer now that we swallowed one.
+
       dma_buf_16 = (UINT16 *) dma_buf_8;                                                // We want the address as both a pointer to a byte and a short for ease of addressing
 
 //      printf(".");
 //      fflush(stdout);
 
-      memcpy( raw_bufs+(raw_buf_for_dump*bufsize), dma_buf_8, bufsize );                // Copy the whole EDT buffer into the debugging array
-      if ( ++raw_buf_for_dump == raw_bufs_to_dump ) raw_buf_for_dump = 0;               // Cycle througn to the next buffer
+//      memcpy( raw_bufs+(raw_buf_for_dump*bufsize), dma_buf_8, bufsize );                // Copy the whole EDT buffer into the debugging array
+//      if ( ++raw_buf_for_dump == raw_bufs_to_dump ) raw_buf_for_dump = 0;               // Cycle througn to the next buffer
 
       if (synced) {                                                                     // Even if we *think* we're synced up, we should check that the data is believable before committing to it.
 
@@ -596,6 +611,9 @@ void *edt2flip()
             FlipBuffArray[wflip].Buff_time = Current_GPStime;                           // Save the time stamp of this second in the flip buffer so it can be later copied to the main array
             FlipBuffArray[wflip].fibre_lane = fibre_lane;                               // Save the lane. Later on, other threads will check if this has been changed and act appropriately
 
+            FlipBuffArray[wflip].sec_start_time = sec_start_time;			// Time that the first buffer for this second was handed to the application (now a second ago)
+            FlipBuffArray[wflip].sec_start2end = sec_start2end;				// The number of bytes after the start of the second and before we got a chance to record the time stamp above.
+
             // We have now completely filled the current write flip buffer and we're ready to give it away to another thread to insert into the working linked list.
 
             if ( Current_GPStime >= start_capture_time ) {                              // Have we reached the time when we wanted to start capturing data?
@@ -621,7 +639,11 @@ void *edt2flip()
 
             memcpy( write_flip, dma_buf_8+OneSecBuff_Size-written_to_flip, bufsize-(OneSecBuff_Size-written_to_flip) );         // Copy the start of the new second into the new write buffer
             written_to_flip = bufsize-(OneSecBuff_Size-written_to_flip);                                                        // Set the new tally for the new second's write buffer
-            Current_GPStime++;                                                                                                  // We stayed in sync for the whole sec, so assume we can just increment
+
+            sec_start_time = arrive_time;						// The time we saw the last buffer from the EDT is now the start time for this new second
+            sec_start2end = written_to_flip;						// and this is how many bytes of the new second were in that buffer (used for estimating the rollover time)
+
+            Current_GPStime++;								// We stayed in sync for the whole sec, so assume we can just increment
 
           }
 
@@ -629,8 +651,6 @@ void *edt2flip()
       }
 
       if (!synced) {                                                                    // We don't know where in the data stream we are.  Try to work it out by looking for valid receiver headers
-
-        clock_gettime( CLOCK_REALTIME, &arrive_time);                                   // Grab the time now for accuracy.  We may want it later.
 
         for (loop=0; loop<packet_size_16; loop++) {                                     // Look at the first full packet size worth of data from the EDT to try to find a believable packet header
 
@@ -646,6 +666,8 @@ void *edt2flip()
 
           if (next_packet_no != ((this_packet_no+packets_per_buff-3) % packets_per_sec)) {      // This *could* be lots of monkeys typing but it's probable that the EDT cards DMA buffers have gone bad :(
 
+// Might be a good place to write out the information needed to work out what we're seeing instead of trying to kick the EDT card
+/*
             Current_GPStime = (INT64)arrive_time.tv_sec - GPS_offset;                   // What's the current time?
             if (Current_GPStime == GPStime_of_fail) {
               failures_this_sec++;                                                      // How many this sec have been bad?  If the EDT Card lost buffer sync, it will spit junk ~17 times per second
@@ -676,7 +698,7 @@ void *edt2flip()
               edt_start_buffers(edt_p, numbufs) ;                                       // restart the transfers and allow only numbufs before stopping
 
             }
-
+*/
             break;                                                                      // Whether the card is reset or not, this whole buffer is useless.
           }
 
@@ -689,7 +711,7 @@ void *edt2flip()
 
           // We did it!  We found a packet that contains the beginning of a fresh second.
 
-          Current_GPStime = (INT64)arrive_time.tv_sec - GPS_offset;                             // This will be GPS timestamp that lives with this packet forever.
+          Current_GPStime = (INT64)arrive_time.tv_sec - GPS_offset;                     // This will be GPS timestamp that lives with this packet forever.
 
           // We only want to write the data from the beginning of the second. Not the whole buffer.
           memcpy( write_flip, dma_buf_8+offset_to_nxt_sec, written_to_flip=(bufsize-offset_to_nxt_sec) );       // Copy to the BEGINNING of the write buffer.
@@ -700,8 +722,10 @@ void *edt2flip()
           // I'd rather stick with integer maths though and that is around 2581/555ths.  I can't just multiply by 2581 though because that will likely exceed an int32.  Let's break this into chunks.
           // * 89 / 37 * 29 / 15 is pretty darn close. (~4.650450) and won't overflow an int32 at any point so long as the buffer remaining is less than 23MB which is bigger than the whole buffer size.
 
-          Current_GPStime_nsec = (int)arrive_time.tv_nsec - ((((written_to_flip*89)/37)*29)/15);		// It's only an estimate. Close enough for government work I hope!
+          sec_start_time = arrive_time;							// Time that the first buffer for this second is handed to the application
+          sec_start2end = written_to_flip;						// and this is how many bytes of the new second were in that buffer (used for estimating the rollover time)
 
+          Current_GPStime_nsec = (int)arrive_time.tv_nsec - ((((written_to_flip*89)/37)*29)/15);		// It's only an estimate. Close enough for government work I hope!
 //          if ( Current_GPStime_nsec > 500000000 ) Current_GPStime_nsec -= 1000000000;				// With a little clock drift, the packet may arrive before it's sent
 
           next_packet_no = this_packet_no + packets_per_buff + 1;                       // What packet will the next buffer start with? Careful. It may need tweaking.
@@ -756,6 +780,19 @@ void *flip2buff()
 
     INT64 latest_time;                                                  // GPS time of the latest buffer
 
+    INT64 health_Buff_time;						// health (ie logging) copy of GPS time of last buffer
+    INT64 health_last_Buff_time = 0;					// When did we last have a good second before this one?
+
+    struct timespec health_sec_start_time;				// health (ie logging) copy of time that first packet for this second handed to us in linux format
+    INT64 health_GPS_start_sec;						// GPS conversion of the above linux seconds
+    int health_GPS_start_nsec;						// and the fractional second component of above
+
+    int health_sec_start2end;						// health (ie logging) copy of num bytes after start of second and before we recorded time stamp above.
+    INT16 health_fibre_lane;						// health (ie logging) copy of current fibre
+    int health_rec;							// health (ie logging) copy of receiver number [1-16]
+    int health_fibre3;							// health (ie logging) copy of fibre 0, 1 or 2 on this receiver. (numbers are 0 based)
+    int health_est_lag_time;						// The estimated lag time from the start of a second, until the first edt block is handed to us in nsec.
+
     int buff_ndx;                                                       // The OneSecBuff_ndx that the current flip buffer relates to.
     int new_ndx;                                                        // Used in the search for a new entry.  Eventually it will succeed, even if we need to kill good data.
     UINT8 *new_buff;                                                    // working storage for malloced block while we verify it.
@@ -795,7 +832,10 @@ void *flip2buff()
 
       // Populate relevant entries in the metadata array
 
-      latest_time = my->Buff_time = FlipBuffArray[flip].Buff_time;      // Copy the time from the flip buffer to the time in the main buffer array.
+      latest_time = my->Buff_time = FlipBuffArray[flip].Buff_time;      // Copy the GPS time from the flip buffer to the time in the main buffer array.
+
+      my->sec_start_time = FlipBuffArray[flip].sec_start_time;		// Copy the full linux time from the flip buffer to the main buffer array.
+      my->sec_start2end = FlipBuffArray[flip].sec_start2end;		// Copy the number of bytes after the start of the second and before we got a chance to record the time stamp above.
 
       my->GPS_32 = (UINT32) ( my->Buff_time & bot32mask );              // Bottom 32 bits of GPS time. Used in network packets where upper 32 bits can be assumed.
       my->udp_ndx = my->GPS_32 & (UDP_BUFS-1);                          // which of the udp indexes is the right one for this buffer?
@@ -824,7 +864,16 @@ void *flip2buff()
       my->Buff_locks = 0x00;                    // No one is holding read locks on this block (yet).  NB Doesn't apply if you have a full Mutex on the array like me now.
       my->Neededby = 0x03;                      // WIP!!!  Really needs to be filled with current 'Are we in ICS & Correlator modes?' flags!!!  For now set to the two threads that need to use this buffer
 
-      // Add the current write buffer to the linked list
+      // Copy relevant fields from this buffer's metadata for health and logging purposes later on (ie when we aren't holding mutex locks)
+
+      health_Buff_time = my->Buff_time;					// GPS Time stamp attached by edt2flip thread
+      health_sec_start_time = my->sec_start_time;			// time we first got a block with the new second
+      health_sec_start2end = my->sec_start2end;				// How much data followed the start of second
+      health_fibre_lane = my->fibre_lane;				// last fibre
+      health_rec = my->rec;						// last receiver
+      health_fibre3 = my->fibre3;					// last fibre (0,1,2) within receiver
+
+      // Add the current write buffer to the linked list of all buffers
 
       OneSecBuffArray[OneSecBuff_last].Buff_next = buff_ndx;            // What *was* the most recent entry, now needs to point to me.
       OneSecBuffArray[buff_ndx].Buff_next = -1;                         // I, on the other hand, shouldn't point anywhere forward,
@@ -848,7 +897,8 @@ void *flip2buff()
 //        new_buff = (UINT8*) malloc(OneSecBuff_Size);
         if ( posix_memalign((void **)&new_buff,4096,OneSecBuff_Size+6) != 0 ) new_buff = NULL;
 
-        printf("m"); fflush(stdout);                                    // Debug output
+//      printf("m"); fflush(stdout);                                    // Debug output
+
         if (new_buff != NULL) {                                         // The malloc worked so we'll add this into the pool of buffers.  Last index in the array, but oldest chronologically.
           new_ndx = OneSecBuff_inuse++;                                 // Notice it is POSTFIX increment.  We now have 'n' number of them allocated, but the last one is 'n-1'.
           OneSecBuffArray[new_ndx].Buff_ptr = new_buff;                 // We'll be reusing this buffer a lot, so we need to store its address.
@@ -912,6 +962,34 @@ void *flip2buff()
       flip ^= 0x01;                                                     // Flip the buffer!  If it *was* pointing to element zero, it's now pointing to element one and vice versa.
 
       OneSecBuff_Sec = latest_time;                                     // Set the global latest time to tell all the other threads that it's worth looking for a new second.
+
+      // Let's log some details about how we have a complete new second of data that we're ready to use
+
+      health_GPS_start_sec = (INT64)health_sec_start_time.tv_sec - GPS_offset;		// Convert the linux arrival time to GPS seconds
+      health_GPS_start_nsec = (int) health_sec_start_time.tv_nsec;	// and grab the fractional second component
+      health_est_lag_time = ((( (health_sec_start2end*89) /37)*29)/15);	// The estimated lag time from the start of a second, until the first edt block is handed to us in nsec
+
+      printf( "\n%lld.%09d: lag=%09d, est=%d, assigned=%lld, lost=%lld, Rec%02d:%d (%d), pid=%d, id=%d, %s, %d, %d, %d, offset=%d",
+        health_GPS_start_sec,
+        health_GPS_start_nsec,
+        health_est_lag_time,
+        health_GPS_start_nsec - health_est_lag_time,
+        health_Buff_time,
+        (health_Buff_time - health_last_Buff_time - 1),
+        health_rec,
+        health_fibre3,
+        health_fibre_lane,
+        getpid(),
+        conf.edt2udp_id,
+        conf.host,
+        conf.edt_unit,
+        conf.edt_channel,
+        BUILD,
+        health_sec_start2end );
+
+      fflush(stdout);
+
+      health_last_Buff_time = health_Buff_time;				// Now *this* second is the *last* good second
 
 /*
 struct timespec debug_time;
@@ -1543,10 +1621,11 @@ int main(int argc, char **argv)
     signal(SIGUSR1, sigusr1_handler);                   // Tell the OS that we want to trap SIGUSR1 calls
 
 //---------------- Check for leap seconds in GPS time offset ------------------------
-
-    struct timespec check_leap_secs;                            // We need to look at the current time to see if the leap second has occurred.  That needs space to store it.
+/*
+    struct timespec check_leap_secs;                            // We need to look at the current time to see if the leap second has occurred.  That takes memory space to store it.
     clock_gettime( CLOCK_REALTIME, &check_leap_secs);           // Ask the OS what the wall clock time is
     if ( ((INT64)check_leap_secs.tv_sec) >= 1483228799 ) GPS_offset = 315964782;        // If it's after leap second occurred then GPS offset is different.  NB check_leap_secs is in Linux epoch NOT GPS epoch time
+*/
     printf( "Leap second offset is currently %d\n", GPS_offset );
     fflush(stdout);
 
@@ -1886,22 +1965,3 @@ int main(int argc, char **argv)
 
     return(0);
 }
-/* rf_input values in 128T correlator order.  Use to sparce populate a 65536 element back-lookup table.  ie Enter this value, return the correlator order 0-255
-102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,
-142,143,144,145,146,147,148,149,150,151,152,153,154,155,156,157,
-202,203,204,205,206,207,208,209,210,211,212,213,214,215,216,217,
-222,223,224,225,226,227,228,229,230,231,232,233,234,235,236,237,
-242,243,244,245,246,247,248,249,250,251,252,253,254,255,256,257,
-262,263,264,265,266,267,268,269,270,271,272,273,274,275,276,277,
-282,283,284,285,286,287,288,289,290,291,292,293,294,295,296,297,
-302,303,304,305,306,307,308,309,310,311,312,313,314,315,316,317,
-322,323,324,325,326,327,328,329,330,331,332,333,334,335,336,337,
-4002,4003,4004,4005,4006,4007,4008,4009,4010,4011,4012,4013,4014,4015,4016,4017,
-4018,4019,4020,4021,4022,4023,4024,4025,4026,4027,4028,4029,4030,4031,4032,4033,
-4034,4035,4036,4037,4038,4039,4040,4041,4042,4043,4044,4045,4046,4047,4048,4049,
-4050,4051,4052,4053,4054,4055,4056,4057,4058,4059,4060,4061,4062,4063,4064,4065,
-4066,4067,4068,4069,4070,4071,4072,4073,4074,4075,4076,4077,4078,4079,4080,4081,
-4082,4083,4084,4085,4086,4087,4088,4089,4090,4091,4092,4093,4094,4095,4096,4097,
-4098,4099,4100,4101,4102,4103,4104,4105,4106,4107,4108,4109,4110,4111,4112,4113
-}
-*/
