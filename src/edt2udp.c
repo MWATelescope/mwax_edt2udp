@@ -5,6 +5,10 @@
 // Author(s)  BWC Brian Crosse brian.crosse@curtin.edu.au
 // Commenced 2018-07-04
 //
+// 3.00a-034    2021-11-10 BWC  Make 'kick' edt also open and close the port.
+//				Add support for health packets to show 'unusable','junk','badsync' & 'lostsync' counts
+//				Automatically kick the edt card if the arrival time for the second's data is late two times in a row.
+//
 // 3.00a-033    2021-10-26 BWC  Change medconv01 multicast interface details for the new medconv01
 //
 // 3.00a-032    2021-10-22 BWC  Fix sign error in "Possible recovery" logic
@@ -115,7 +119,7 @@
 
 #define _GNU_SOURCE
 
-#define BUILD 33
+#define BUILD 34
 #define WORKINGCHAN 8
 
 #include "edtinc.h"
@@ -344,6 +348,8 @@ int max_files=2147483647;                               // Let's set a 'silly la
 int edtbufs = 12;                                       // Set a default number of buffers for the EDT card
 int edtbufsize = 12;                                    // Set a default size in MegaBytes for the EDT card buffers.  NB: If this number is greater than 23, then the maths for arrival times needs tweaking.
 
+static const int too_late_ns = 50000000;		// If a seconds data arrives after this arrival lag twice, assume the edt card needs a kick
+
 medconv_config_t conf;                                  // A place to store the configuration data for this instance of the program.  ie of the 60 copies running on 10 computers or whatever
 medconv_health_t health;				// Health data shared among threads.  Transmitted by flip2buff to multicast
 
@@ -390,6 +396,15 @@ INT32 unpackhdr(UINT16 *ptr, INT16 *fibre_lane)
     }                                                                           // then we believe this one, otherwise *we* should do the increment that the receiver *should* have done
 
     return(packet_num);
+}
+
+//---------------------------------------------------------------------------------------------------------------------------------------------------
+// inc_clip - Increment an unsigned char but clip to 255 (ie prevent rollover)
+//---------------------------------------------------------------------------------------------------------------------------------------------------
+
+void inc_clip ( uint8_t *var_to_inc )
+{
+    if ( *var_to_inc < 255) (*var_to_inc)++;					// Iff it's currently less than 255, then add one more to it.
 }
 
 //---------------------------------------------------------------------------------------------------------------------------------------------------
@@ -596,6 +611,15 @@ void *edt2flip()
       if ( kick_edt ) {									// Are we supposed to reset all the EDT ring buffers?  'cos if we are...
         edt_disable_ring_buffers(edt_p);						// get back the valuable low memory (<4GB)
 
+        edt_close(edt_p) ;								// Completely hand back the edt card port
+
+        if ((edt_p = edt_open_channel(EDT_INTERFACE, edt_unit, edt_channel)) == NULL) {	// Now grab it again, but if it fails
+          printf("edt_open_channel failed\n");
+          fflush(stdout);
+          terminate = TRUE;								// we made things worse and we should terminate
+          pthread_exit(NULL);
+        }
+
         if (edt_configure_ring_buffers(edt_p, bufsize, numbufs, EDT_READ, NULL) == -1) {	// recreate the buffers, but if that failed
           printf("Unable to configure %d ring-buffers of %d bytes\n", numbufs, bufsize);
           fflush(stdout);
@@ -700,8 +724,9 @@ void *edt2flip()
           printf( "%d, %d", (next_packet_no+packets_per_buff-3)%packets_per_sec, unpackhdr(&dma_buf_16[next_packet_ndx+big_step_in], &fibre_lane) );
 //          printf( ", %d",raw_buf_for_dump );
           printf( "\n" );
-
           fflush(stdout);
+
+          inc_clip( &health.seen_lostsync );						// Increment the number of times we've lost sync
 
         } else {                                                                        // Looks good.  Let's trust it.
 
@@ -741,6 +766,8 @@ void *edt2flip()
               } else {                                                                  // If we fail to get a mutex, we'll just lose this second's data and reuse the buffer we already have.
                 printf( "s" );
                 fflush( stdout );
+                inc_clip( &health.seen_other );						// Increment the number of times bad stuff happens
+
               }
 
             } else {                                                                    // It isn't time to start saving data yet, so just ignore this second
@@ -820,7 +847,12 @@ void *edt2flip()
           // It's no good to us though, if it doesn't have a one second clockover in it that we can sync on.
 
           offset_to_nxt_sec = ((packets_per_sec-this_packet_no) % packets_per_sec) * packet_size_8 + (loop*2);  // when do we expect the beginning of the new second?
-          if (offset_to_nxt_sec >= bufsize)  {printf("u"); fflush(stdout); break;}                              // The new second doesn't start inside this buffer.  Give up and get a new buffer.
+
+          if (offset_to_nxt_sec >= bufsize) {						// The new second doesn't start inside this buffer.
+            printf("u"); fflush(stdout);
+            inc_clip( &health.seen_unusable );						// Increment the number of unusable packets we've seen
+            break;									// Give up and get a new buffer.
+          }
 
           // We did it!  We found a packet that contains the beginning of a fresh second.
 
@@ -854,7 +886,10 @@ void *edt2flip()
           break;                                                                        // No point in carrying on the 'for' loop.
         }
 
-        if (loop==packet_size_16) { printf("j"); fflush(stdout); }                      // The 'for' loop finished (ie no 'break') and we didn't see a packet anywhere.  This is junk!
+        if (loop==packet_size_16) {							// If the 'for' loop finished (ie no 'break') and we didn't see a packet anywhere
+          printf("j"); fflush(stdout);							// then this is junk!
+          inc_clip( &health.seen_junk );						// Increment the number of junk packets we've seen
+        }
 
       }
 
@@ -898,6 +933,7 @@ void *flip2buff()
     struct timespec health_sec_start_time;				// health (ie logging) copy of time that first packet for this second handed to us in linux format
     INT64 health_GPS_start_sec;						// GPS conversion of the above linux seconds
     int health_GPS_start_nsec;						// and the fractional second component of above
+    int health_prev_GPS_start_nsec = 0;					// and a copy of (above) from the previous second's data
 
     int health_sec_start2end;						// health (ie logging) copy of num bytes after start of second and before we recorded time stamp above.
     INT16 health_fibre_lane;						// health (ie logging) copy of current fibre
@@ -1169,6 +1205,10 @@ void *flip2buff()
         health_GPS_start_nsec = -1000000000;				// so set an impossible nsec time to warn M&C via the health packets
       }
 
+      if ( ( health_GPS_start_nsec >= too_late_ns ) && ( health_prev_GPS_start_nsec >= too_late_ns ) ) {	// If both this second's data, and the previous second's, arrive after the allowed arrival lag
+        kick_edt = TRUE;						// Request that we should reset all the EDT card ring buffers
+      }
+
       printf( " %lld:%10d, lost=%lld, Rec%02d:%d, lane=%d, pid=%d, id=%d, %s, %d, %d, %d, offset=%d",
         health_GPS_start_sec,
         health_GPS_start_nsec,
@@ -1210,6 +1250,8 @@ void *flip2buff()
       health.seen_other = 0;						// How many other warnings occurred since the last health packet (clips at 255.  Treat as 'zero' or 'non-zero' flag)
 
       health_last_Buff_time = health_Buff_time;				// Now *this* second is the *last* good second
+
+      health_prev_GPS_start_nsec = health_GPS_start_nsec;		// and this second's nsec arrival time is the previous recorded one.  NB: There's no guarantee these are actually consecutive but we don't really care.
 
       // End of health packet sending
 
@@ -1488,6 +1530,7 @@ OneSecBuffArray[our_buff].Buff_time );
               if ( (( header1 >> 16 ) != 0x0800) & (subsec != 624) & (sample != 2047) ) {
                 printf( "Bad sync subs=%d, smpl=%d.  Hdr1=%d, Hdr2=%d\n", subsec, sample, header1, header2 );
                 fflush(stdout);
+                inc_clip( &health.seen_badsync );							// Increment the number of times we lost sync while promoting packets
               }
 
               d_sample_ptr += d_sample_step;                                                    // We step right a single time step and point to the 1st input and channel for the next sample time (not whole subsec)
