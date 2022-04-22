@@ -5,6 +5,8 @@
 // Author(s)  BWC Brian Crosse brian.crosse@curtin.edu.au
 // Commenced 2018-07-04
 //
+// 3.00a-032    2021-10-22 BWC  Fix sign error in "Possible recovery" logic
+//
 // 3.00a-031    2021-10-20 BWC  Improve health info and provide more details about EDT blocks that lose sync.
 //
 // 3.00a-030    2021-10-13 BWC  Send health data packets to 224.0.2.2:8003
@@ -110,7 +112,7 @@
 
 #define _GNU_SOURCE
 
-#define BUILD 31
+#define BUILD 32
 #define WORKINGCHAN 8
 
 #include "edtinc.h"
@@ -670,15 +672,17 @@ void *edt2flip()
               if ( check_packet_no >= 0 ) {						// Wow. It looks valid.  Maybe we're back in Kansas and can use the data from here. We need more checking to know for sure.
                 // If we are fully synchronized and there was only one burst of lost characters, then we will be able to step through each one to the end of the buffer
 
-                printf("\n Possible recovery: npn=%d, np_ndx=%d, lgpn=%d, lgp_ndx=%ld, cpn=%d, cp_ndx=%ld, dist=%ld, lost=%ld",		//
-                  next_packet_no,													//
-                  next_packet_ndx,													//
-                  last_good_packet_no,													//
-                  ( last_good_packet_ptr - dma_buf_16 ),										//
-                  check_packet_no,													//
-                  ( check_packet_ptr - dma_buf_16 ),											//
-                  ( last_good_packet_ptr - check_packet_ptr ),										//
-                  ( check_packet_no - last_good_packet_no ) * packet_size_8 - ( 2 * ( last_good_packet_ptr - check_packet_ptr ) ) );
+                printf("\nPossible recovery npn=%d, np_ndx=%d, lgpn=%d, lgp_ndx=%ld, cpn=%d, cp_ndx=%ld, dist=%ld, lost=%ld, zero=%d",	//
+                  next_packet_no,														//
+                  next_packet_ndx,														//
+                  last_good_packet_no,														//
+                  ( last_good_packet_ptr - dma_buf_16 ),											//
+                  check_packet_no,														//
+                  ( check_packet_ptr - dma_buf_16 ),												//
+                  ( check_packet_ptr - last_good_packet_ptr ),											//
+                  ( check_packet_no - last_good_packet_no ) * packet_size_8 - ( 2 * ( check_packet_ptr - last_good_packet_ptr ) ),		//
+                  ( check_packet_no - last_good_packet_no )											//
+                  );
 
                 break;
               }
