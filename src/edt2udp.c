@@ -5,7 +5,10 @@
 // Author(s)  BWC Brian Crosse brian.crosse@curtin.edu.au
 // Commenced 2018-07-04
 //
+// 3.00a-033    2021-10-26 BWC  Change medconv01 multicast interface details for the new medconv01
+//
 // 3.00a-032    2021-10-22 BWC  Fix sign error in "Possible recovery" logic
+//				=IF((AI50-1130496)<0,AI50-1130496+12*1024*1024,AI50-1130496) to keep track of w2f offsets
 //
 // 3.00a-031    2021-10-20 BWC  Improve health info and provide more details about EDT blocks that lose sync.
 //
@@ -112,7 +115,7 @@
 
 #define _GNU_SOURCE
 
-#define BUILD 32
+#define BUILD 33
 #define WORKINGCHAN 8
 
 #include "edtinc.h"
@@ -403,12 +406,12 @@ void read_config ( char *us, int edtu, int edtc, medconv_config_t *config )
 
     medconv_config_t mc_config[MAXINSTANCE] = {
        { 0,"unknown",0,0,""}
-      ,{ 1,"medconv01",0,0,"192.168.90.121","10.128.6.1"}
-      ,{ 2,"medconv01",0,1,"192.168.90.121","10.128.6.1"}
-      ,{ 3,"medconv01",0,2,"192.168.90.121","10.128.6.1"}
-      ,{ 4,"medconv01",1,0,"192.168.90.122","10.128.6.1"}
-      ,{ 5,"medconv01",1,1,"192.168.90.122","10.128.6.1"}
-      ,{ 6,"medconv01",1,2,"192.168.90.122","10.128.6.1"}
+      ,{ 1,"medconv01",0,0,"192.168.90.1","10.128.6.1"}
+      ,{ 2,"medconv01",0,1,"192.168.90.1","10.128.6.1"}
+      ,{ 3,"medconv01",0,2,"192.168.90.1","10.128.6.1"}
+      ,{ 4,"medconv01",1,0,"192.168.90.2","10.128.6.1"}
+      ,{ 5,"medconv01",1,1,"192.168.90.2","10.128.6.1"}
+      ,{ 6,"medconv01",1,2,"192.168.90.2","10.128.6.1"}
 
       ,{ 7,"medconv02",0,0,"192.168.90.3","10.128.6.2"}
       ,{ 8,"medconv02",0,1,"192.168.90.3","10.128.6.2"}
