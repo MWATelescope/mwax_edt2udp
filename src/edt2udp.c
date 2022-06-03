@@ -458,6 +458,8 @@ medconv_health_t health;				// Health data shared among threads.  Transmitted by
 
 cpu_set_t physical_id_0, physical_id_1;                 // Make a CPU affinity set for socket 0 and one for socket 1 (NUMA node0 and node1)
 
+const UINT16 port_layout[] = {6, 4, 2, 0, 14, 12, 10, 8}; // Map logical to physical tile assignments.
+
 UINT64 counters[100];
 
 //---------------------------------------------------------------------------------------------------------------------------------------------------
@@ -1929,6 +1931,58 @@ if ( terminate ) {
     pthread_exit(NULL);                                                 // We fell out of the while loop, so they must want us to terminate
 }
 
+
+//---------------------------------------------------------------------------------------------------------------------------------------------------
+// load_port_map - Load RRI to RF_Input mapping from a CSV file.
+//---------------------------------------------------------------------------------------------------------------------------------------------------
+
+int load_port_map(char *path, UINT16 *table) {
+  // Read the whole input file into a buffer.
+  char *data;
+  FILE *file;
+  size_t sz;
+  file = fopen(path, "r");
+  fseek(file, 0, SEEK_END);
+  sz = ftell(file);
+  rewind(file);
+  data = malloc(sz+1);
+  data[sz] = '\n'; // Simplifies parsing slightly
+  fread(data, 1, sz-1, file);
+  fclose(file);
+
+  int row = 0, col = 0;                                // Current row and column in input table
+  char *sep = ",";                                     // Next expected separator
+  char *end = NULL;                                    // Mark where `strtol` stops parsing
+  char *tok = strtok(data, sep);                       // Pointer to start of next value in input
+  while(row < 16) {
+    while(col < 8) {
+      int tile = strtol(tok, &end, 10);                // Parse the current token as a number,
+      if(end == NULL || *end != '\0') break;           // consuming the whole token, or abort.
+      
+      int id = tile << 1;                              // Internal IDs use lower bit for polarisation
+      int cell = row*16 + PORT_LAYOUT[col];            // Determine logical to physical port mapping
+      table[cell] = id + 1;                            // Store the higher source ID first.
+      table[cell+1] = id;
+      
+      if(col == 6)                                     // If we've parsed the second-to-last column,
+        sep = "\n";                                    // the next separator to expect will be LF.
+      else if(col == 7)                                // If we've parsed the last column, the next
+        sep = ",";                                     // separator will be a comma again.
+      col++;
+
+      tok = strtok(NULL, sep);                         // Get the next token from the input and
+      if(tok == NULL) break;                           // abort the row if we don't find one.
+    }
+    if(col == 8) col = 0;                              // Wrap to column 0 if we parsed a full row
+    else break;                                        // or abort if we didn't.
+    row++;
+  }
+
+  int result = row == 16;                              // Parsing 16 full rows is a success.
+  free(data);
+  return result;
+}
+
 //---------------------------------------------------------------------------------------------------------------------------------------------------
 
 void sigint_handler(int signo)
@@ -2242,6 +2296,7 @@ int main(int argc, char **argv)
         309,308,307,306,305,304,303,302,317,316,315,314,313,312,311,310,
         329,328,327,326,325,324,323,322,337,336,335,334,333,332,331,330
     };
+    load_port_map("/vulcan/mwax_config/tile_ids.txt", rri2rf_input);
 
 /*
     UINT16 rri2rf_input[256] = {                                                                // RRI to rf_input SHORT BASELINE
