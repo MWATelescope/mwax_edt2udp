@@ -1934,6 +1934,9 @@ if ( terminate ) {
 
 //---------------------------------------------------------------------------------------------------------------------------------------------------
 // load_port_map - Load RRI to RF_Input mapping from a CSV file.
+//
+// This file describes how tiles are connected to receivers. Each row represents one of the 16 receivers, and the value in each column is the tile ID
+// plugged into the corresponding (external) receiver port.
 //---------------------------------------------------------------------------------------------------------------------------------------------------
 
 int load_port_map(char *path, UINT16 *table) {
@@ -1942,12 +1945,23 @@ int load_port_map(char *path, UINT16 *table) {
   FILE *file;
   size_t sz;
   file = fopen(path, "r");
+  if(file == NULL) {
+    fprintf(stderr, "Failed to open %s", path);
+    return 1;
+  }
   fseek(file, 0, SEEK_END);
   sz = ftell(file);
   rewind(file);
+  if(sz == -1) {
+    fprintf(stderr, "Failed to determine file size: %s", path);
+    return 2;
+  }
   data = malloc(sz+1);
-  data[sz] = '\n'; // Simplifies parsing slightly
-  fread(data, 1, sz-1, file);
+  data[sz] = '\n';                                     // Simplifies parsing slightly
+  if(fread(data, 1, sz-1, file) != sz) {
+    fprintf(stderr, "Failed reading %s - unexpected data length.", path);
+    return 3;
+  }
   fclose(file);
 
   int row = 0, col = 0;                                // Current row and column in input table
@@ -1978,7 +1992,7 @@ int load_port_map(char *path, UINT16 *table) {
     row++;
   }
 
-  int result = row == 16;                              // Parsing 16 full rows is a success.
+  int result = !(row == 16);                           // Parsing 16 full rows is a success.
   free(data);
   return result;
 }
@@ -2296,7 +2310,10 @@ int main(int argc, char **argv)
         309,308,307,306,305,304,303,302,317,316,315,314,313,312,311,310,
         329,328,327,326,325,324,323,322,337,336,335,334,333,332,331,330
     };
-    load_port_map("/vulcan/mwax_config/tile_ids.txt", rri2rf_input);
+    if(!load_port_map("/vulcan/mwax_config/tile_ids.txt", rri2rf_input)) {
+      fprintf(stderr, "Failed to load port configuration data.");
+      exit(1);
+    }
 
 /*
     UINT16 rri2rf_input[256] = {                                                                // RRI to rf_input SHORT BASELINE
