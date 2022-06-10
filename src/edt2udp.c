@@ -1976,7 +1976,7 @@ int load_port_map(char *path, UINT16 *table) {
       if(end == NULL || *end != '\0') break;           // consuming the whole token, or abort.
       
       int id = tile << 1;                              // Internal IDs use lower bit for polarisation
-      int cell = row*16 + PORT_LAYOUT[col];            // Determine logical to physical port mapping
+      int cell = row*16 + port_layout[col];            // Determine logical to physical port mapping
       table[cell] = id + 1;                            // Store the higher source ID first.
       table[cell+1] = id;
       
