@@ -4,7 +4,9 @@
 //
 // Author(s)  BWC Brian Crosse brian.crosse@curtin.edu.au
 // Commenced 2018-07-04
-#define BUILD 36
+#define BUILD 37
+//
+// 3.00c-037    2022-06-10 LAW  Configuration file loader
 //
 // 3.00c-036    2022-05-10 LAW  Receiver 4 handles tile 31-38
 //
