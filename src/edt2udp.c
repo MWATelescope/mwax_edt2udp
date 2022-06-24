@@ -464,6 +464,11 @@ const UINT16 port_layout[] = {6, 4, 2, 0, 14, 12, 10, 8}; // Map logical to phys
 
 UINT64 counters[100];
 
+volatile monitor_udp_count = 0;     // Total number of UDP packets sent.
+volatile monitor_udp_last = 0;      // Number of UDP packets sent as of the most recent activity status check.
+struct timespec monitor_udp_time;   // Time of the most recent activity status check.
+
+
 //---------------------------------------------------------------------------------------------------------------------------------------------------
 // unpackhdr - Unpack the receiver packet header into components
 // Is passed a pointer to the beginning of a packet and returns that packet's sequence number in the second of data
@@ -533,7 +538,7 @@ void read_config ( char *us, int edtu, int edtc, medconv_config_t *config )
       ,{ 3,"medconv01",0,2,"192.168.90.1","10.128.6.1"}
       ,{ 4,"medconv01",1,0,"192.168.90.2","10.128.6.1"}
       ,{ 5,"medconv01",1,1,"192.168.90.2","10.128.6.1"}
-      ,{ 6,"medconv01",1,2,"192.168.90.2","10.128.6.1"}
+      ,{ 6,"medconv01",1,2,"127.0.0.1","10.128.6.1"}
 
       ,{ 7,"medconv02",0,0,"192.168.90.3","10.128.6.2"}
       ,{ 8,"medconv02",0,1,"192.168.90.3","10.128.6.2"}
@@ -1038,6 +1043,7 @@ void *flip2buff()
     INT64 health_last_Buff_time = 0;					// When did we last have a good second before this one?
 
     struct timespec health_sec_start_time;				// health (ie logging) copy of time that first packet for this second handed to us in linux format
+    struct timespec now;
     INT64 health_GPS_start_sec;						// GPS conversion of the above linux seconds
     int health_GPS_start_nsec;						// and the fractional second component of above
     int health_prev_GPS_start_nsec = 0;					// and a copy of (above) from the previous second's data
@@ -1341,6 +1347,17 @@ void *flip2buff()
       health.receiver = health_rec;
       health.fibre3 = health_fibre3;
       health.lane = health_fibre_lane;
+
+      clock_gettime(CLOCK_REALTIME, &now);
+      if(now.tv_sec - monitor_udp_time.tv_sec > 1) {
+        if(monitor_udp_count - monitor_udp_last == 0) {
+          health.medconv_state &= ~(1 << 1);
+        } else {
+          health.medconv_state |= 1 << 1;
+        }
+        monitor_udp_last = monitor_udp_count;
+        monitor_udp_last = now;
+      }
 
       // Now send the multicast udp health packet
 
@@ -1913,7 +1930,7 @@ if ( terminate ) {
               udp_2_send -= actually_sent;
               udp_sent += actually_sent;
               actually_sent_ever += actually_sent;
-
+              monitor_udp_count += actually_sent;
 //printf( "Tx-%d,%d,%d,%d\n", udp_sent, udp_2_send, try_to_send, actually_sent );
 
             }
