@@ -1046,6 +1046,7 @@ void *flip2buff()
 
     struct timespec health_sec_start_time;				// health (ie logging) copy of time that first packet for this second handed to us in linux format
     struct timespec now;
+    monitor_udp_time.tv_sec = 0;
     INT64 health_GPS_start_sec;						// GPS conversion of the above linux seconds
     int health_GPS_start_nsec;						// and the fractional second component of above
     int health_prev_GPS_start_nsec = 0;					// and a copy of (above) from the previous second's data
@@ -1979,7 +1980,7 @@ int load_port_map(char *path, UINT16 *table) {
   }
   data = malloc(sz+1);
   data[sz] = '\n';                                     // Simplifies parsing slightly
-  if(fread(data, 1, sz-1, file) != sz) {
+  if(fread(data, 1, sz, file) != sz) {
     fprintf(stderr, "Failed reading %s - unexpected data length.", path);
     return 3;
   }
@@ -2012,7 +2013,7 @@ int load_port_map(char *path, UINT16 *table) {
     else break;                                        // or abort if we didn't.
     row++;
   }
-
+  fprintf(stderr, "Found %d rows.", row);
   int result = !(row == 16);                           // Parsing 16 full rows is a success.
   free(data);
   return result;
@@ -2331,9 +2332,12 @@ int main(int argc, char **argv)
         309,308,307,306,305,304,303,302,317,316,315,314,313,312,311,310,
         329,328,327,326,325,324,323,322,337,336,335,334,333,332,331,330
     };
-    if(!load_port_map("/vulcan/mwax_config/tile_ids.txt", rri2rf_input)) {
+    if(load_port_map("/vulcan/mwax_config/tile_ids.txt", rri2rf_input) != 0) {
       fprintf(stderr, "Failed to load port configuration data.");
       exit(1);
+    }
+    for(int i=0; i<256; i++) {
+      fprintf(stderr, "%d, ", rri2rf_input[i]);
     }
 
 /*
