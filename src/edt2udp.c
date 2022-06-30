@@ -2331,7 +2331,7 @@ int main(int argc, char **argv)
         309,308,307,306,305,304,303,302,317,316,315,314,313,312,311,310,
         329,328,327,326,325,324,323,322,337,336,335,334,333,332,331,330
     };
-    if(!load_port_map("/vulcan/mwax_config/tile_ids.txt", rri2rf_input)) {
+    if(load_port_map("/vulcan/mwax_config/tile_ids.txt", rri2rf_input) != 0) {
       fprintf(stderr, "Failed to load port configuration data.");
       exit(1);
     }
