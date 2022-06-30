@@ -1046,6 +1046,7 @@ void *flip2buff()
 
     struct timespec health_sec_start_time;				// health (ie logging) copy of time that first packet for this second handed to us in linux format
     struct timespec now;
+    monitor_udp_time.tv_sec = 0;
     INT64 health_GPS_start_sec;						// GPS conversion of the above linux seconds
     int health_GPS_start_nsec;						// and the fractional second component of above
     int health_prev_GPS_start_nsec = 0;					// and a copy of (above) from the previous second's data
