@@ -466,8 +466,8 @@ const UINT16 port_layout[] = {6, 4, 2, 0, 14, 12, 10, 8}; // Map logical to phys
 
 UINT64 counters[100];
 
-volatile monitor_udp_count = 0;     // Total number of UDP packets sent.
-volatile monitor_udp_last = 0;      // Number of UDP packets sent as of the most recent activity status check.
+volatile INT64 monitor_udp_count = 0;     // Total number of UDP packets sent.
+volatile INT64 monitor_udp_last = 0;      // Number of UDP packets sent as of the most recent activity status check.
 struct timespec monitor_udp_time;   // Time of the most recent activity status check.
 
 
@@ -1358,7 +1358,7 @@ void *flip2buff()
           health.medconv_state |= 1 << 1;
         }
         monitor_udp_last = monitor_udp_count;
-        monitor_udp_last = now;
+        monitor_udp_time = now;
       }
 
       // Now send the multicast udp health packet
