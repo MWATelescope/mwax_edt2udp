@@ -2335,6 +2335,9 @@ int main(int argc, char **argv)
       fprintf(stderr, "Failed to load port configuration data.");
       exit(1);
     }
+    for(int i=0; i<256; i++) {
+      fprintf(stderr, "%d, ", rri2rf_input[i]);
+    }
 
 /*
     UINT16 rri2rf_input[256] = {                                                                // RRI to rf_input SHORT BASELINE
