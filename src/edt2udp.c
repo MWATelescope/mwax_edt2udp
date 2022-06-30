@@ -1979,7 +1979,7 @@ int load_port_map(char *path, UINT16 *table) {
   }
   data = malloc(sz+1);
   data[sz] = '\n';                                     // Simplifies parsing slightly
-  if(fread(data, 1, sz-1, file) != sz) {
+  if(fread(data, 1, sz, file) != sz) {
     fprintf(stderr, "Failed reading %s - unexpected data length.", path);
     return 3;
   }
