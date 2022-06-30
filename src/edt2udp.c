@@ -2012,7 +2012,7 @@ int load_port_map(char *path, UINT16 *table) {
     else break;                                        // or abort if we didn't.
     row++;
   }
-
+  fprintf(stderr, "Found %d rows.", row);
   int result = !(row == 16);                           // Parsing 16 full rows is a success.
   free(data);
   return result;
