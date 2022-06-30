@@ -4,7 +4,9 @@
 //
 // Author(s)  BWC Brian Crosse brian.crosse@curtin.edu.au
 // Commenced 2018-07-04
-#define BUILD 37
+#define BUILD 38
+//
+// 3.00d-038    2022-06-24 LAW  Multicast stalled indicator in health packet. Multicast suppressed for medconv01:1:2 for future debugging purposes.
 //
 // 3.00c-037    2022-06-10 LAW  Configuration file loader
 //
