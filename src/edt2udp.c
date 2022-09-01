@@ -412,7 +412,7 @@ typedef struct metabin {
 #define MAX_OBS_IDS (8)
 
 volatile BOOL terminate = FALSE;                        // Global request for everyone to close down
-volatile BOOL kick_edt = FALSE;				// Global request (probably from a sigusr1 signal sent to us) that we should reset all the EDT card ring buffers
+volatile BOOL kick_edt = FALSE;		                   		// Global request (probably from a sigusr1 signal sent to us) that we should reset all the EDT card ring buffers
 
 volatile INT64 OneSecBuff_Sec = 0;                      // GPS_Time of the latest block completely handed off to 'buff2udp' worker thread
 volatile INT64 OneSecBuff_udp = 0;                      // GPS_Time of the latest block completely handed off to 'udp2nic' worker thread
@@ -439,7 +439,7 @@ static const int OneSecBuff_Size = 1280000 * 168;       // How big is each secon
 //static const int NumChan=8;                           // Total number of coarse channels we need to handle.  8 on a singe fibre (3 fibres per receiver each handled by different processes)
 //static const int time_points_per_sec = 20;            // The protocol specifies 20 groups (of 500 packets of 10kHz) per second
 //static const int coarse_buff_size = 528000;           // Protocol specifies 528000 bytes (2000 packets) for each coarse chan before moving on to next. Equal to OneSecBuff_Size / NumChan / time_points_per_sec
-//static const int fiftyms_buff_size = 12672000;                // Protocol specifies 12672000 bytes (24 x 2000 packets) for each 50ms time step before moving on to next.  Equal to coarse_buff_size * NumChan
+//static const int fiftyms_buff_size = 12672000;        // Protocol specifies 12672000 bytes (24 x 2000 packets) for each 50ms time step before moving on to next.  Equal to coarse_buff_size * NumChan
 
 int GPS_offset = 315964782;                             // The number of seconds that must be SUBTRACTED from the Linux Epoch to get MWA's GPS time.  Corrected for leap seconds in startup code
 
@@ -455,11 +455,10 @@ int max_files=2147483647;                               // Let's set a 'silly la
 int edtbufs = 12;                                       // Set a default number of buffers for the EDT card
 int edtbufsize = 12;                                    // Set a default size in MegaBytes for the EDT card buffers.  NB: If this number is greater than 23, then the maths for arrival times needs tweaking.
 
-static const int too_late_ns = 50000000;		// If a seconds data arrives after this arrival lag twice, assume the edt card needs a kick
+static const int too_late_ns = 50000000;            		// If a seconds data arrives after this arrival lag twice, assume the edt card needs a kick
 
 medconv_config_t conf;                                  // A place to store the configuration data for this instance of the program.  ie of the 60 copies running on 10 computers or whatever
-medconv_health_t health;				// Health data shared among threads.  Transmitted by flip2buff to multicast
-
+medconv_health_t health;	                           		// Health data shared among threads.  Transmitted by flip2buff to multicast
 cpu_set_t physical_id_0, physical_id_1;                 // Make a CPU affinity set for socket 0 and one for socket 1 (NUMA node0 and node1)
 
 const UINT16 port_layout[] = {6, 4, 2, 0, 14, 12, 10, 8}; // Map logical to physical tile assignments.
