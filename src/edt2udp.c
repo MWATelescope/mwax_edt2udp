@@ -4,7 +4,9 @@
 //
 // Author(s)  BWC Brian Crosse brian.crosse@curtin.edu.au
 // Commenced 2018-07-04
-#define BUILD 38
+#define BUILD 39
+//
+// 3.00e-039    2022-11-22 LAW  Disable kicking EDT card automatically.
 //
 // 3.00d-038    2022-06-24 LAW  Multicast stalled indicator in health packet. Multicast suppressed for medconv01:1:2 for future debugging purposes.
 //
@@ -1348,9 +1350,10 @@ void *flip2buff()
         health_GPS_start_nsec = -1000000000;				// so set an impossible nsec time to warn M&C via the health packets
       }
 
-      if ( ( health_GPS_start_nsec >= too_late_ns ) && ( health_prev_GPS_start_nsec >= too_late_ns ) ) {	// If both this second's data, and the previous second's, arrive after the allowed arrival lag
-        kick_edt = TRUE;						// Request that we should reset all the EDT card ring buffers
-      }
+      // Disable this behaviour for now
+      //if ( ( health_GPS_start_nsec >= too_late_ns ) && ( health_prev_GPS_start_nsec >= too_late_ns ) ) {	// If both this second's data, and the previous second's, arrive after the allowed arrival lag
+      //  kick_edt = TRUE;						// Request that we should reset all the EDT card ring buffers
+      //}
 
       printf( " %lld:%10d, lost=%lld, Rec%02d:%d, lane=%d, pid=%d, id=%d, %s, %d, %d, %d, offset=%d",
         health_GPS_start_sec,
